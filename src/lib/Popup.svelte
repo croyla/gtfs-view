@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { GtfsData } from './types';
   import type { CardEntry } from './popupTypes';
+  import type { LiveProcessed } from './liveStopTimes';
   import StopCard from './StopCard.svelte';
   import RouteCard from './RouteCard.svelte';
   import TripCard from './TripCard.svelte';
@@ -8,10 +9,12 @@
   let {
     initialCard,
     gtfsData,
+    liveProcessed = null,
     onClose,
   }: {
     initialCard: CardEntry;
     gtfsData: GtfsData;
+    liveProcessed?: LiveProcessed | null;
     onClose: () => void;
   } = $props();
 
@@ -94,11 +97,11 @@
     <!-- Content -->
     <div class="flex-1 overflow-y-auto px-5 py-4">
       {#if current.type === 'stop'}
-        <StopCard stopId={current.stopId} {gtfsData} onNavigate={navigate} />
+        <StopCard stopId={current.stopId} {gtfsData} {liveProcessed} onNavigate={navigate} />
       {:else if current.type === 'route'}
-        <RouteCard routeId={current.routeId} {gtfsData} onNavigate={navigate} />
+        <RouteCard routeId={current.routeId} {gtfsData} {liveProcessed} onNavigate={navigate} />
       {:else if current.type === 'trip'}
-        <TripCard tripId={current.tripId} {gtfsData} onNavigate={navigate} />
+        <TripCard tripId={current.tripId} {gtfsData} {liveProcessed} onNavigate={navigate} />
       {/if}
     </div>
   </div>

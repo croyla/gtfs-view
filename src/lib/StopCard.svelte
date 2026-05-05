@@ -1,15 +1,19 @@
 <script lang="ts">
   import type { GtfsData } from './types';
   import type { CardEntry } from './popupTypes';
+  import type { LiveProcessed } from './liveStopTimes';
+  import { computeMetrics } from './liveStopTimes';
   import { haversineKm, formatTime, parseTimeMin } from './popupUtils';
 
   let {
     stopId,
     gtfsData,
+    liveProcessed = null,
     onNavigate,
   }: {
     stopId: string;
     gtfsData: GtfsData;
+    liveProcessed?: LiveProcessed | null;
     onNavigate: (card: CardEntry) => void;
   } = $props();
 
@@ -17,7 +21,6 @@
 
   const stop = $derived(gtfsData.stops.get(stopId));
 
-  // Single pass over stop_times to build all needed data
   const stopInfo = $derived.by(() => {
     if (!stop) return null;
     const routeIds = new Set<string>();
@@ -51,7 +54,7 @@
     }
 
     rows.sort((a, b) => a.timeMin - b.timeMin);
-    return { tripCount: rows.length, routeCount: routeIds.size, rows };
+    return { tripCount: rows.length, routeCount: routeIds.size, routeIds, rows };
   });
 
   const nearbyStops = $derived.by(() => {
@@ -65,7 +68,57 @@
     return nearby.sort((a, b) => a.distKm - b.distKm).slice(0, 3);
   });
 
-  // Reset tab when stop changes
+  // Overall live metrics for this stop
+  const liveMetrics = $derived.by(() => {
+    if (!liveProcessed) return null;
+    const liveSTs = liveProcessed.byStop.get(stopId) ?? [];
+    const scheduled = liveProcessed.scheduledByStop.get(stopId) ?? new Set<string>();
+    return computeMetrics(liveSTs, scheduled, liveProcessed.observedTripIds);
+  });
+
+  // Per-route breakdown
+  const routeMetrics = $derived.by(() => {
+    if (!liveProcessed || !stopInfo) return [];
+    const result: {
+      routeId: string;
+      routeShort: string;
+      routeColor: string | undefined;
+      metrics: ReturnType<typeof computeMetrics>;
+    }[] = [];
+
+    for (const routeId of stopInfo.routeIds) {
+      const route = gtfsData.routes.get(routeId);
+      // Live stop times at this stop for this route
+      const liveSTs = (liveProcessed.byStop.get(stopId) ?? []).filter(s => s.route_id === routeId);
+      // Scheduled trips at this stop for this route
+      const scheduledAtStop = liveProcessed.scheduledByStop.get(stopId) ?? new Set<string>();
+      const scheduledForRoute = liveProcessed.scheduledByRoute.get(routeId) ?? new Set<string>();
+      const scheduled = new Set<string>();
+      for (const id of scheduledAtStop) {
+        if (scheduledForRoute.has(id)) scheduled.add(id);
+      }
+      const observedForRoute = new Set(liveSTs.map(s => s.trip_id));
+      result.push({
+        routeId,
+        routeShort: route?.route_short_name || routeId,
+        routeColor: route?.route_color,
+        metrics: computeMetrics(liveSTs, scheduled, observedForRoute),
+      });
+    }
+    return result.sort((a, b) => a.routeShort.localeCompare(b.routeShort));
+  });
+
+  function pctColor(v: number | null) {
+    if (v === null) return 'text-slate-500';
+    if (v >= 80) return 'text-emerald-400';
+    if (v >= 60) return 'text-amber-400';
+    return 'text-red-400';
+  }
+
+  function fmtPct(v: number | null) {
+    return v === null ? '—' : `${v.toFixed(0)}%`;
+  }
+
   $effect(() => { stopId; activeTab = 'overview'; });
 </script>
 
@@ -101,6 +154,56 @@
           <p class="text-2xl font-bold text-white tabular-nums">{stopInfo.routeCount}</p>
         </div>
       </div>
+
+      <!-- Live metrics -->
+      {#if liveMetrics}
+        <div>
+          <p class="text-[10px] uppercase tracking-wide text-slate-500 mb-2">Live performance</p>
+          <div class="grid grid-cols-3 gap-2">
+            {#each [
+              { label: 'Operation',   value: liveMetrics.operationPct },
+              { label: 'Reliability', value: liveMetrics.reliabilityPct },
+              { label: 'Timeliness',  value: liveMetrics.timelinessPct },
+            ] as metric (metric.label)}
+              <div class="rounded-lg bg-slate-800 px-2.5 py-2 text-center">
+                <p class="text-[10px] uppercase tracking-wide text-slate-500 mb-1">{metric.label}</p>
+                <p class="text-lg font-bold tabular-nums {pctColor(metric.value)}">{fmtPct(metric.value)}</p>
+              </div>
+            {/each}
+          </div>
+        </div>
+
+        <!-- Per-route breakdown -->
+        {#if routeMetrics.length > 1}
+          <div>
+            <p class="text-[10px] uppercase tracking-wide text-slate-500 mb-2">By route</p>
+            <div class="space-y-1.5">
+              {#each routeMetrics as rm (rm.routeId)}
+                <div class="rounded-lg bg-slate-800 px-3 py-2">
+                  <div class="flex items-center gap-2 mb-1">
+                    {#if rm.routeColor}
+                      <span class="h-2 w-2 shrink-0 rounded-sm" style="background:{rm.routeColor}"></span>
+                    {/if}
+                    <button
+                      class="text-xs font-medium text-slate-300 hover:text-white transition-colors"
+                      onclick={() => onNavigate({ type: 'route', routeId: rm.routeId })}
+                    >{rm.routeShort}</button>
+                  </div>
+                  <div class="flex gap-2">
+                    {#each [
+                      { label: 'Op', value: rm.metrics.operationPct },
+                      { label: 'Rel', value: rm.metrics.reliabilityPct },
+                      { label: 'Time', value: rm.metrics.timelinessPct },
+                    ] as m (m.label)}
+                      <span class="text-[10px] {pctColor(m.value)}">{m.label} {fmtPct(m.value)}</span>
+                    {/each}
+                  </div>
+                </div>
+              {/each}
+            </div>
+          </div>
+        {/if}
+      {/if}
 
       {#if nearbyStops.length > 0}
         <div>

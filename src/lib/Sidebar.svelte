@@ -1,20 +1,30 @@
 <script lang="ts">
   import type { GtfsData, RouteTreeNode, AgencyTreeNode } from './types';
+  import type { LiveData } from './liveTypes';
+  import type { LiveProcessed } from './liveStopTimes';
 
   let {
     gtfsData,
+    liveData = null,
+    liveProcessed = null,
     checkedKeys,
     showShapes = $bindable(true),
     showStops  = $bindable(true),
     showHeatmap = $bindable(false),
+    interpolateSkipped = $bindable(false),
     onToggleKeys,
+    onOpenLoader,
   }: {
     gtfsData: GtfsData | null;
+    liveData?: LiveData | null;
+    liveProcessed?: LiveProcessed | null;
     checkedKeys: Set<string>;
     showShapes?: boolean;
     showStops?: boolean;
     showHeatmap?: boolean;
+    interpolateSkipped?: boolean;
     onToggleKeys: (keys: string[], on: boolean) => void;
+    onOpenLoader: () => void;
   } = $props();
 
   let expandedAgencies = $state(new Set<string>());
@@ -69,6 +79,44 @@
 </script>
 
 <aside class="flex w-64 shrink-0 flex-col border-r border-slate-800 bg-slate-900 overflow-hidden">
+
+  <!-- Live data badge -->
+  {#if liveData}
+    {@const visited = liveProcessed?.stopTimes.filter(s => s.visited).length ?? null}
+    {@const skipped = liveProcessed?.stopTimes.filter(s => s.skipped).length ?? null}
+    <div class="border-b border-slate-800 px-3 py-2.5 space-y-0.5">
+      <div class="flex items-center gap-2">
+        <span class="h-1.5 w-1.5 rounded-full bg-emerald-400 shrink-0 animate-pulse"></span>
+        <p class="text-[10px] font-semibold uppercase tracking-widest text-emerald-500">Live data</p>
+      </div>
+      <p class="text-[10px] text-slate-400">
+        {liveData.vehiclePositions.length.toLocaleString()} positions ·
+        {liveData.vehicleCount} vehicles ·
+        {liveData.routeCount} routes
+      </p>
+      {#if liveProcessed}
+        <p class="text-[10px] text-slate-500">
+          {visited} visited · {skipped} skipped ·
+          {liveProcessed.stopTimes.length - (visited ?? 0) - (skipped ?? 0)} no data
+        </p>
+      {:else if gtfsData}
+        <p class="text-[10px] text-slate-600 italic">computing stop times…</p>
+      {:else}
+        <p class="text-[10px] text-slate-600 italic">load GTFS to match stops</p>
+      {/if}
+      {#if liveProcessed && gtfsData}
+        <label class="flex cursor-pointer items-center gap-2 mt-1.5 pt-1.5 border-t border-slate-800/60">
+          <input
+            type="checkbox"
+            class="h-3 w-3 accent-emerald-500 shrink-0"
+            checked={interpolateSkipped}
+            onchange={(e) => (interpolateSkipped = e.currentTarget.checked)}
+          />
+          <span class="text-[10px] text-slate-400 leading-tight">Assume stops at every stop</span>
+        </label>
+      {/if}
+    </div>
+  {/if}
 
   <!-- Layers section -->
   <div class="border-b border-slate-800 px-3 py-3 space-y-1">
@@ -202,5 +250,18 @@
         {/each}
       </div>
     {/if}
+  </div>
+
+  <!-- Load data button -->
+  <div class="border-t border-slate-800 p-2 shrink-0">
+    <button
+      class="w-full flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-xs text-slate-400 hover:bg-slate-800 hover:text-slate-200 transition-colors"
+      onclick={onOpenLoader}
+    >
+      <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.5">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M2 10.5v1.75A1.75 1.75 0 003.75 14h8.5A1.75 1.75 0 0014 12.25V10.5M8 2v8m-3-3l3-3 3 3" />
+      </svg>
+      Load data
+    </button>
   </div>
 </aside>

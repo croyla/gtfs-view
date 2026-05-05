@@ -1,7 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { loadGtfsFromBlob, loadGtfsFromUrl } from './lib/gtfs';
+  import { loadLiveDataFromBlob } from './lib/liveDataLoader';
+  import { buildLiveStopTimes, applyInterpolation } from './lib/liveStopTimes';
   import type { GtfsData } from './lib/types';
+  import type { LiveData } from './lib/liveTypes';
   import MapView from './lib/Map.svelte';
   import Sidebar from './lib/Sidebar.svelte';
   import SourcePrompt from './lib/SourcePrompt.svelte';
@@ -10,16 +13,18 @@
 
   // ── Data ─────────────────────────────────────────────────────────────────────
 
-  let gtfsData = $state<GtfsData | null>(null);
-  let loading  = $state(false);
-  let error    = $state<string | null>(null);
+  let gtfsData  = $state<GtfsData | null>(null);
+  let liveData  = $state<LiveData | null>(null);
+  let loading   = $state(false);
+  let error     = $state<string | null>(null);
   let showPrompt = $state(false);
 
   // ── Visibility toggles ────────────────────────────────────────────────────────
 
-  let showShapes  = $state(true);
-  let showStops   = $state(true);
-  let showHeatmap = $state(false);
+  let showShapes          = $state(true);
+  let showStops           = $state(true);
+  let showHeatmap         = $state(false);
+  let interpolateSkipped  = $state(false);
 
   // ── Checked state (shape group keys) ─────────────────────────────────────────
 
@@ -88,6 +93,18 @@
     return weights;
   });
 
+  // ── Live stop times (computed when both datasets are present) ────────────────
+
+  const liveProcessed = $derived.by(() => {
+    if (!liveData || !gtfsData) return null;
+    return buildLiveStopTimes(liveData, gtfsData);
+  });
+
+  const effectiveLiveProcessed = $derived.by(() => {
+    if (!liveProcessed || !interpolateSkipped) return liveProcessed;
+    return applyInterpolation(liveProcessed);
+  });
+
   // ── Popup ─────────────────────────────────────────────────────────────────────
 
   let popupCard = $state<CardEntry | null>(null);
@@ -119,10 +136,8 @@
     loading = true; error = null;
     try {
       gtfsData = await loadGtfsFromUrl(url);
-      showPrompt = false;
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to load GTFS from URL';
-      showPrompt = true;
     } finally { loading = false; }
   }
 
@@ -130,9 +145,17 @@
     loading = true; error = null;
     try {
       gtfsData = await loadGtfsFromBlob(blob);
-      showPrompt = false;
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to parse GTFS file';
+    } finally { loading = false; }
+  }
+
+  async function handleLiveDbSelect(blob: Blob) {
+    loading = true; error = null;
+    try {
+      liveData = await loadLiveDataFromBlob(blob);
+    } catch (e) {
+      error = e instanceof Error ? e.message : 'Failed to load live data database';
     } finally { loading = false; }
   }
 </script>
@@ -140,11 +163,15 @@
 <div class="flex h-screen w-screen overflow-hidden bg-slate-950 text-white">
   <Sidebar
     {gtfsData}
+    {liveData}
+    {liveProcessed}
     {checkedKeys}
     bind:showShapes
     bind:showStops
     bind:showHeatmap
+    bind:interpolateSkipped
     onToggleKeys={toggleKeys}
+    onOpenLoader={() => { showPrompt = true; error = null; }}
   />
 
   <div class="relative flex-1">
@@ -176,8 +203,12 @@
       <SourcePrompt
         {loading}
         {error}
+        gtfsLoaded={gtfsData !== null}
+        liveLoaded={liveData !== null}
         onFileSelect={handleFileSelect}
         onUrlSubmit={fetchAndLoad}
+        onLiveDbSelect={handleLiveDbSelect}
+        onClose={() => { showPrompt = false; error = null; }}
       />
     {/if}
   </div>
@@ -186,6 +217,7 @@
     <Popup
       initialCard={popupCard}
       {gtfsData}
+      liveProcessed={effectiveLiveProcessed}
       onClose={() => (popupCard = null)}
     />
   {/if}

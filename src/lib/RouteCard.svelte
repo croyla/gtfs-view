@@ -1,15 +1,19 @@
 <script lang="ts">
   import type { GtfsData } from './types';
   import type { CardEntry } from './popupTypes';
+  import type { LiveProcessed } from './liveStopTimes';
+  import { computeMetrics } from './liveStopTimes';
   import { formatTime, formatDuration, parseTimeMin, shapeDistanceKm } from './popupUtils';
 
   let {
     routeId,
     gtfsData,
+    liveProcessed = null,
     onNavigate,
   }: {
     routeId: string;
     gtfsData: GtfsData;
+    liveProcessed?: LiveProcessed | null;
     onNavigate: (card: CardEntry) => void;
   } = $props();
 
@@ -20,7 +24,6 @@
   const route = $derived(gtfsData.routes.get(routeId));
   const agency = $derived(route ? gtfsData.agencies.get(route.agency_id) : undefined);
 
-  // Single pass over stop_times to compute per-trip first/last stop + duration
   const routeInfo = $derived.by(() => {
     if (!route) return null;
 
@@ -55,7 +58,6 @@
       }
     }
 
-    // Average duration
     let durationSum = 0, durationCount = 0;
     for (const b of tripBounds.values()) {
       const dep = parseTimeMin(b.minTime), arr = parseTimeMin(b.maxTime);
@@ -63,7 +65,6 @@
     }
     const avgDurationMin = durationCount > 0 ? durationSum / durationCount : 0;
 
-    // Shape distance: longest shape on this route
     const shapeIds = new Set<string>();
     for (const trip of gtfsData.trips.values()) {
       if (trip.route_id === routeId && trip.shape_id) shapeIds.add(trip.shape_id);
@@ -74,7 +75,6 @@
       if (pts) { const d = shapeDistanceKm(pts); if (d > maxDistKm) maxDistKm = d; }
     }
 
-    // Group trips by first→last stop pair
     type TripGroup = {
       key: string;
       firstStopName: string;
@@ -106,6 +106,41 @@
 
     return { tripCount: tripBounds.size, avgDurationMin, maxDistKm, groups: sortedGroups };
   });
+
+  // Overall live metrics for this route
+  const liveMetrics = $derived.by(() => {
+    if (!liveProcessed) return null;
+    const liveSTs = liveProcessed.byRoute.get(routeId) ?? [];
+    const scheduled = liveProcessed.scheduledByRoute.get(routeId) ?? new Set<string>();
+    return computeMetrics(liveSTs, scheduled, liveProcessed.observedTripIds);
+  });
+
+  // Per-group live metrics
+  const groupMetrics = $derived.by(() => {
+    if (!liveProcessed || !routeInfo) return new Map<string, ReturnType<typeof computeMetrics>>();
+    const result = new Map<string, ReturnType<typeof computeMetrics>>();
+    for (const group of routeInfo.groups) {
+      const tripIds = new Set(group.trips.map(t => t.tripId));
+      const liveSTs = (liveProcessed.byRoute.get(routeId) ?? []).filter(s => tripIds.has(s.trip_id));
+      const scheduled = new Set<string>();
+      for (const id of tripIds) {
+        if (liveProcessed.scheduledTripIds.has(id)) scheduled.add(id);
+      }
+      result.set(group.key, computeMetrics(liveSTs, scheduled, liveProcessed.observedTripIds));
+    }
+    return result;
+  });
+
+  function pctColor(v: number | null) {
+    if (v === null) return 'text-slate-500';
+    if (v >= 80) return 'text-emerald-400';
+    if (v >= 60) return 'text-amber-400';
+    return 'text-red-400';
+  }
+
+  function fmtPct(v: number | null) {
+    return v === null ? '—' : `${v.toFixed(0)}%`;
+  }
 </script>
 
 {#if route && routeInfo}
@@ -144,7 +179,7 @@
         </div>
       </div>
 
-      <!-- Stats grid -->
+      <!-- Static stats grid -->
       <div class="grid grid-cols-3 gap-2">
         <div class="rounded-lg bg-slate-800 px-2.5 py-2">
           <p class="text-[10px] uppercase tracking-wide text-slate-500 mb-1">Trips</p>
@@ -164,6 +199,25 @@
         {/if}
       </div>
 
+      <!-- Live metrics -->
+      {#if liveMetrics}
+        <div>
+          <p class="text-[10px] uppercase tracking-wide text-slate-500 mb-2">Live performance</p>
+          <div class="grid grid-cols-3 gap-2">
+            {#each [
+              { label: 'Operation',   value: liveMetrics.operationPct },
+              { label: 'Reliability', value: liveMetrics.reliabilityPct },
+              { label: 'Timeliness',  value: liveMetrics.timelinessPct },
+            ] as metric (metric.label)}
+              <div class="rounded-lg bg-slate-800 px-2.5 py-2 text-center">
+                <p class="text-[10px] uppercase tracking-wide text-slate-500 mb-1">{metric.label}</p>
+                <p class="text-lg font-bold tabular-nums {pctColor(metric.value)}">{fmtPct(metric.value)}</p>
+              </div>
+            {/each}
+          </div>
+        </div>
+      {/if}
+
       {#if route.route_type}
         <p class="text-xs text-slate-500">Route ID: {route.route_id} · Type: {route.route_type}</p>
       {/if}
@@ -176,6 +230,7 @@
     {:else}
       <div class="overflow-y-auto space-y-4">
         {#each routeInfo.groups as group (group.key)}
+          {@const gm = groupMetrics.get(group.key)}
           <div>
             <div class="flex items-center gap-2 mb-1.5 px-1">
               <span class="text-xs text-slate-300 truncate">{group.firstStopName}</span>
@@ -184,13 +239,36 @@
               </svg>
               <span class="text-xs text-slate-300 truncate">{group.lastStopName}</span>
             </div>
+
+            {#if gm}
+              <div class="flex gap-2 mb-1.5 px-1">
+                {#each [
+                  { label: 'Op', value: gm.operationPct },
+                  { label: 'Rel', value: gm.reliabilityPct },
+                  { label: 'Time', value: gm.timelinessPct },
+                ] as m (m.label)}
+                  <span class="rounded px-1.5 py-0.5 text-[10px] bg-slate-800 {pctColor(m.value)}">
+                    {m.label} {fmtPct(m.value)}
+                  </span>
+                {/each}
+              </div>
+            {/if}
+
             <div class="space-y-0">
               {#each group.trips as t (t.tripId)}
+                {@const hasLive = liveProcessed?.observedTripIds.has(t.tripId) ?? false}
                 <button
                   class="w-full flex items-center justify-between px-3 py-1.5 rounded-lg hover:bg-slate-800 text-left transition-colors"
                   onclick={() => onNavigate({ type: 'trip', tripId: t.tripId })}
                 >
-                  <span class="text-sm tabular-nums text-slate-200">{formatTime(t.departureTime)}</span>
+                  <div class="flex items-center gap-2">
+                    {#if hasLive}
+                      <span class="h-1.5 w-1.5 rounded-full bg-emerald-400 shrink-0"></span>
+                    {:else}
+                      <span class="h-1.5 w-1.5 rounded-full bg-slate-700 shrink-0"></span>
+                    {/if}
+                    <span class="text-sm tabular-nums text-slate-200">{formatTime(t.departureTime)}</span>
+                  </div>
                   <svg class="h-3 w-3 text-slate-600" viewBox="0 0 12 12" fill="none">
                     <path d="M4 2l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
                   </svg>

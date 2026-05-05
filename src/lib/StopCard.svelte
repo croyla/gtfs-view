@@ -31,8 +31,7 @@
       timeMin: number;
     }[] = [];
 
-    for (const st of gtfsData.stopTimes) {
-      if (st.stop_id !== stopId) continue;
+    for (const st of gtfsData.stopTimesByStop.get(stopId) ?? []) {
       const trip = gtfsData.trips.get(st.trip_id);
       if (!trip) continue;
       const route = gtfsData.routes.get(trip.route_id);

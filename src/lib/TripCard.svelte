@@ -18,9 +18,7 @@
     if (!trip) return null;
     const route = gtfsData.routes.get(trip.route_id);
 
-    const stopTimes = gtfsData.stopTimes
-      .filter(st => st.trip_id === tripId)
-      .sort((a, b) => a.stop_sequence - b.stop_sequence)
+    const stopTimes = (gtfsData.stopTimesByTrip.get(tripId) ?? [])
       .map(st => ({
         ...st,
         stop: gtfsData.stops.get(st.stop_id),

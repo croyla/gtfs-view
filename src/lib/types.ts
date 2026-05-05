@@ -75,9 +75,10 @@ export interface GtfsData {
   trips: Map<string, Trip>;
   routes: Map<string, Route>;
   shapes: Map<string, ShapePoint[]>;
-  stopTimes: StopTime[];
   shapeColors: Map<string, string>;
-  tripStops: Map<string, string[]>; // trip_id → ordered unique stop_ids
+  tripStops: Map<string, string[]>;      // trip_id → ordered unique stop_ids
+  stopTimesByTrip: Map<string, StopTime[]>; // trip_id → stop_times sorted by sequence
+  stopTimesByStop: Map<string, StopTime[]>; // stop_id → stop_times (unsorted)
   tree: AgencyTreeNode[];
   allShapeKeys: Set<string>;
 }

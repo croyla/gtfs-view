@@ -81,8 +81,8 @@
       if (checkedKeys.has(key)) activeTrips.add(trip.trip_id);
     }
     const weights = new Map<string, number>();
-    for (const st of gtfsData.stopTimes) {
-      if (activeTrips.has(st.trip_id))
+    for (const tripId of activeTrips) {
+      for (const st of gtfsData.stopTimesByTrip.get(tripId) ?? [])
         weights.set(st.stop_id, (weights.get(st.stop_id) ?? 0) + 1);
     }
     return weights;

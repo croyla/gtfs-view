@@ -31,26 +31,26 @@
 
     const tripBounds = new Map<string, TripBounds>();
 
-    for (const st of gtfsData.stopTimes) {
-      const trip = gtfsData.trips.get(st.trip_id);
-      if (!trip || trip.route_id !== routeId) continue;
-
-      const curr = tripBounds.get(st.trip_id);
-      if (!curr) {
-        tripBounds.set(st.trip_id, {
-          minSeq: st.stop_sequence, minTime: st.departure_time || st.arrival_time, minStopId: st.stop_id,
-          maxSeq: st.stop_sequence, maxTime: st.arrival_time || st.departure_time, maxStopId: st.stop_id,
-        });
-      } else {
-        if (st.stop_sequence < curr.minSeq) {
-          curr.minSeq = st.stop_sequence;
-          curr.minTime = st.departure_time || st.arrival_time;
-          curr.minStopId = st.stop_id;
-        }
-        if (st.stop_sequence > curr.maxSeq) {
-          curr.maxSeq = st.stop_sequence;
-          curr.maxTime = st.arrival_time || st.departure_time;
-          curr.maxStopId = st.stop_id;
+    for (const trip of gtfsData.trips.values()) {
+      if (trip.route_id !== routeId) continue;
+      for (const st of gtfsData.stopTimesByTrip.get(trip.trip_id) ?? []) {
+        const curr = tripBounds.get(st.trip_id);
+        if (!curr) {
+          tripBounds.set(st.trip_id, {
+            minSeq: st.stop_sequence, minTime: st.departure_time || st.arrival_time, minStopId: st.stop_id,
+            maxSeq: st.stop_sequence, maxTime: st.arrival_time || st.departure_time, maxStopId: st.stop_id,
+          });
+        } else {
+          if (st.stop_sequence < curr.minSeq) {
+            curr.minSeq = st.stop_sequence;
+            curr.minTime = st.departure_time || st.arrival_time;
+            curr.minStopId = st.stop_id;
+          }
+          if (st.stop_sequence > curr.maxSeq) {
+            curr.maxSeq = st.stop_sequence;
+            curr.maxTime = st.arrival_time || st.departure_time;
+            curr.maxStopId = st.stop_id;
+          }
         }
       }
     }

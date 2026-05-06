@@ -2,9 +2,11 @@
   import type { GtfsData } from './types';
   import type { CardEntry } from './popupTypes';
   import type { LiveProcessed } from './liveStopTimes';
+  import type { ExportScope } from './exportReport';
   import StopCard from './StopCard.svelte';
   import RouteCard from './RouteCard.svelte';
   import TripCard from './TripCard.svelte';
+  import ExportModal from './ExportModal.svelte';
 
   let {
     initialCard,
@@ -17,6 +19,8 @@
     liveProcessed?: LiveProcessed | null;
     onClose: () => void;
   } = $props();
+
+  let showExport = $state(false);
 
   let stack = $state<CardEntry[]>([initialCard]);
 
@@ -31,6 +35,13 @@
   }
 
   const current = $derived(stack[stack.length - 1]);
+
+  const exportScope = $derived.by((): ExportScope => {
+    const card = current;
+    if (card.type === 'stop') return { kind: 'stop', stopId: card.stopId };
+    if (card.type === 'route') return { kind: 'route', routeId: card.routeId };
+    return { kind: 'trip', tripId: card.tripId };
+  });
 
   const title = $derived.by(() => {
     const card = current;
@@ -83,6 +94,19 @@
 
       <h2 class="flex-1 text-sm font-semibold text-white truncate">{title}</h2>
 
+      {#if liveProcessed}
+        <button
+          class="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-700 hover:text-slate-200 transition-colors"
+          onclick={() => (showExport = true)}
+          aria-label="Export report"
+          title="Export report"
+        >
+          <svg class="h-4 w-4" viewBox="0 0 16 16" fill="none">
+            <path d="M2 10.5v1.75A1.75 1.75 0 003.75 14h8.5A1.75 1.75 0 0014 12.25V10.5M8 2v8m-3-3l3 3 3-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+      {/if}
+
       <button
         class="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-700 hover:text-slate-200 transition-colors"
         onclick={onClose}
@@ -106,3 +130,12 @@
     </div>
   </div>
 </div>
+
+{#if showExport && liveProcessed}
+  <ExportModal
+    scope={exportScope}
+    {gtfsData}
+    {liveProcessed}
+    onClose={() => (showExport = false)}
+  />
+{/if}

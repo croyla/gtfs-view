@@ -125,12 +125,32 @@
 
   // ── Loading ───────────────────────────────────────────────────────────────────
 
-  onMount(() => {
+  onMount(async () => {
     const params = new URLSearchParams(window.location.search);
     const source = params.get('source');
-    if (source) fetchAndLoad(source);
-    else showPrompt = true;
+    const liveSource = params.get('live_source');
+
+    if (!source && !liveSource) { showPrompt = true; return; }
+
+    loading = true; error = null;
+    await Promise.all([
+      source ? loadGtfsFromUrl(source).then(d => { gtfsData = d; }).catch(e => {
+        error = e instanceof Error ? e.message : 'Failed to load GTFS from URL';
+      }) : Promise.resolve(),
+      liveSource ? fetchLiveBlob(liveSource) : Promise.resolve(),
+    ]);
+    loading = false;
   });
+
+  async function fetchLiveBlob(url: string) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      liveData = await loadLiveDataFromBlob(await res.blob());
+    } catch (e) {
+      error = e instanceof Error ? e.message : 'Failed to load live data from URL';
+    }
+  }
 
   async function fetchAndLoad(url: string) {
     loading = true; error = null;

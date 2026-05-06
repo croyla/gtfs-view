@@ -2,6 +2,9 @@
   import type { GtfsData, RouteTreeNode, AgencyTreeNode } from './types';
   import type { LiveData } from './liveTypes';
   import type { LiveProcessed } from './liveStopTimes';
+  import ExportModal from './ExportModal.svelte';
+
+  let showExport = $state(false);
 
   let {
     gtfsData,
@@ -252,8 +255,19 @@
     {/if}
   </div>
 
-  <!-- Load data button -->
-  <div class="border-t border-slate-800 p-2 shrink-0">
+  <!-- Bottom actions -->
+  <div class="border-t border-slate-800 p-2 shrink-0 space-y-1">
+    {#if liveProcessed && gtfsData}
+      <button
+        class="w-full flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-xs text-slate-400 hover:bg-slate-800 hover:text-slate-200 transition-colors"
+        onclick={() => (showExport = true)}
+      >
+        <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.5">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M2 10.5v1.75A1.75 1.75 0 003.75 14h8.5A1.75 1.75 0 0014 12.25V10.5M8 2v8m-3-3l3 3 3-3" />
+        </svg>
+        Export report
+      </button>
+    {/if}
     <button
       class="w-full flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-xs text-slate-400 hover:bg-slate-800 hover:text-slate-200 transition-colors"
       onclick={onOpenLoader}
@@ -265,3 +279,12 @@
     </button>
   </div>
 </aside>
+
+{#if showExport && liveProcessed && gtfsData}
+  <ExportModal
+    scope={{ kind: 'all' }}
+    {gtfsData}
+    {liveProcessed}
+    onClose={() => (showExport = false)}
+  />
+{/if}

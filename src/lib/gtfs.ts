@@ -70,11 +70,12 @@ function resolveUrl(url: string): string {
   return url;
 }
 
-export async function loadGtfsFromUrl(url: string): Promise<GtfsData> {
+export async function loadGtfsFromUrl(url: string, token?: string): Promise<GtfsData> {
   const resolved = resolveUrl(url.trim());
+  const headers: HeadersInit = token ? { Authorization: `token ${token}` } : {};
   let response: Response;
   try {
-    response = await fetch(resolved, { redirect: 'follow' });
+    response = await fetch(resolved, { redirect: 'follow', headers });
   } catch {
     throw new Error(
       'Network error — this may be a CORS restriction. Try downloading the file and uploading it instead.',

@@ -5,6 +5,8 @@
   import { Protocol } from 'pmtiles';
   import type { Feature, FeatureCollection, LineString, Point } from 'geojson';
   import type { GtfsData, ShapePoint } from './types';
+  import type { GtfsDiff } from './diffGtfs';
+  import { buildDiffStopsGeoJSON, buildDiffShapesGeoJSON } from './diffGtfs';
 
   let {
     gtfsData     = null,
@@ -14,6 +16,8 @@
     showShapes  = true,
     showStops   = true,
     showHeatmap = false,
+    diff        = null,
+    compareData = null,
     onStopClick,
     onShapeClick,
   }: {
@@ -24,6 +28,8 @@
     showShapes?: boolean;
     showStops?: boolean;
     showHeatmap?: boolean;
+    diff?: GtfsDiff | null;
+    compareData?: GtfsData | null;
     onStopClick?: (stopId: string) => void;
     onShapeClick?: (shapeId: string) => void;
   } = $props();
@@ -53,14 +59,21 @@
       if (stopId) onStopClick?.(stopId);
     });
 
+    map.on('click', 'diff-stops', (e) => {
+      const stopId = e.features?.[0]?.properties?.stop_id as string | undefined;
+      if (stopId) onStopClick?.(stopId);
+    });
+
     map.on('click', 'gtfs-shapes', (e) => {
       if (showStops) return;
       const shapeId = e.features?.[0]?.properties?.shape_id as string | undefined;
       if (shapeId) onShapeClick?.(shapeId);
     });
 
-    map.on('mouseenter', 'gtfs-stops', () => { map.getCanvas().style.cursor = 'pointer'; });
-    map.on('mouseleave', 'gtfs-stops', () => { map.getCanvas().style.cursor = ''; });
+    map.on('mouseenter', 'gtfs-stops',  () => { map.getCanvas().style.cursor = 'pointer'; });
+    map.on('mouseleave', 'gtfs-stops',  () => { map.getCanvas().style.cursor = ''; });
+    map.on('mouseenter', 'diff-stops',  () => { map.getCanvas().style.cursor = 'pointer'; });
+    map.on('mouseleave', 'diff-stops',  () => { map.getCanvas().style.cursor = ''; });
     map.on('mouseenter', 'gtfs-shapes', () => { if (!showStops) map.getCanvas().style.cursor = 'pointer'; });
     map.on('mouseleave', 'gtfs-shapes', () => { map.getCanvas().style.cursor = ''; });
   });
@@ -168,6 +181,62 @@
       (map.getSource('gtfs-heatmap') as maplibregl.GeoJSONSource)
         .setData(buildHeatmapGeoJSON(data, weights));
     }
+  });
+
+  // ── Diff overlay layers ───────────────────────────────────────────────────────
+
+  $effect(() => {
+    if (!mapReady) return;
+
+    const d = diff;
+    const cData = compareData;
+    const base = gtfsData;
+    const _showShapes = showShapes;
+    const _showStops  = showStops;
+
+    // Always remove stale diff layers before rebuilding
+    for (const id of ['diff-shapes', 'diff-stops']) {
+      if (map.getLayer(id))   map.removeLayer(id);
+      if (map.getSource(id))  map.removeSource(id);
+    }
+
+    // Show / hide base layers depending on diff mode
+    if (map.getLayer('gtfs-stops'))
+      map.setLayoutProperty('gtfs-stops',  'visibility', (d || !_showStops)  ? 'none' : 'visible');
+    if (map.getLayer('gtfs-shapes'))
+      map.setLayoutProperty('gtfs-shapes', 'visibility', (d || !_showShapes) ? 'none' : 'visible');
+
+    if (!d || !cData || !base) return;
+
+    // Diff shapes layer (below stops)
+    map.addSource('diff-shapes', { type: 'geojson', data: buildDiffShapesGeoJSON(base, cData, d) });
+    map.addLayer({
+      id: 'diff-shapes',
+      type: 'line',
+      source: 'diff-shapes',
+      layout: { 'line-join': 'round', 'line-cap': 'round', visibility: _showShapes ? 'visible' : 'none' },
+      paint: {
+        'line-color': ['coalesce', ['get', 'diff_color'], '#818cf8'],
+        'line-width': 2,
+        'line-opacity': 0.85,
+      },
+    });
+
+    // Diff stops layer (topmost)
+    map.addSource('diff-stops', { type: 'geojson', data: buildDiffStopsGeoJSON(base, cData, d) });
+    map.addLayer({
+      id: 'diff-stops',
+      type: 'circle',
+      source: 'diff-stops',
+      layout: { visibility: _showStops ? 'visible' : 'none' },
+      paint: {
+        'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 3, 14, 6],
+        'circle-color': ['coalesce', ['get', 'diff_color'], 'rgba(255,255,255,0.25)'],
+        'circle-stroke-color': '#0f172a',
+        'circle-stroke-width': 1.5,
+        'circle-opacity': 0.9,
+      },
+    });
   });
 
   // ── Helpers ──────────────────────────────────────────────────────────────────

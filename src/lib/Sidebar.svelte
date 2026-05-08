@@ -7,14 +7,22 @@
     showShapes = $bindable(true),
     showStops  = $bindable(true),
     showHeatmap = $bindable(false),
+    compareData = null,
     onToggleKeys,
+    onLoadCompare,
+    onViewDiff,
+    onClearCompare,
   }: {
     gtfsData: GtfsData | null;
     checkedKeys: Set<string>;
     showShapes?: boolean;
     showStops?: boolean;
     showHeatmap?: boolean;
+    compareData?: GtfsData | null;
     onToggleKeys: (keys: string[], on: boolean) => void;
+    onLoadCompare: () => void;
+    onViewDiff: () => void;
+    onClearCompare: () => void;
   } = $props();
 
   let expandedAgencies = $state(new Set<string>());
@@ -203,4 +211,35 @@
       </div>
     {/if}
   </div>
+
+  <!-- Compare / diff actions -->
+  {#if gtfsData}
+    <div class="border-t border-slate-800 p-2 shrink-0 space-y-1">
+      {#if !compareData}
+        <button
+          class="w-full flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-xs text-slate-400 hover:bg-slate-800 hover:text-slate-200 transition-colors"
+          onclick={onLoadCompare}
+        >
+          <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.5">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M3 8h10M8 3l5 5-5 5"/>
+          </svg>
+          Compare with…
+        </button>
+      {:else}
+        <button
+          class="w-full flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-xs font-medium text-indigo-300 bg-indigo-950/40 hover:bg-indigo-950/70 border border-indigo-800/60 transition-colors"
+          onclick={onViewDiff}
+        >
+          <span class="h-1.5 w-1.5 rounded-full bg-indigo-400 animate-pulse"></span>
+          View diff
+        </button>
+        <button
+          class="w-full flex items-center justify-center gap-2 rounded-lg px-3 py-1.5 text-xs text-slate-500 hover:bg-slate-800 hover:text-slate-300 transition-colors"
+          onclick={onClearCompare}
+        >
+          Clear compare
+        </button>
+      {/if}
+    </div>
+  {/if}
 </aside>

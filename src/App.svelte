@@ -1,19 +1,32 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { loadGtfsFromBlob, loadGtfsFromUrl } from './lib/gtfs';
+  import { computeDiff } from './lib/diffGtfs';
   import type { GtfsData } from './lib/types';
+  import type { GtfsDiff } from './lib/diffGtfs';
   import MapView from './lib/Map.svelte';
   import Sidebar from './lib/Sidebar.svelte';
   import SourcePrompt from './lib/SourcePrompt.svelte';
+  import ComparePrompt from './lib/ComparePrompt.svelte';
   import Popup from './lib/Popup.svelte';
   import type { CardEntry } from './lib/popupTypes';
 
   // ── Data ─────────────────────────────────────────────────────────────────────
 
-  let gtfsData = $state<GtfsData | null>(null);
-  let loading  = $state(false);
-  let error    = $state<string | null>(null);
-  let showPrompt = $state(false);
+  let gtfsData    = $state<GtfsData | null>(null);
+  let compareData = $state<GtfsData | null>(null);
+  let loading     = $state(false);
+  let error       = $state<string | null>(null);
+  let showPrompt  = $state(false);
+  let showCompare = $state(false);
+  let compareLoading = $state(false);
+  let compareError   = $state<string | null>(null);
+  let ghToken = $state<string | null>(null);
+
+  const diff = $derived.by((): GtfsDiff | null => {
+    if (!gtfsData || !compareData) return null;
+    return computeDiff(gtfsData, compareData);
+  });
 
   // ── Visibility toggles ────────────────────────────────────────────────────────
 
@@ -21,21 +34,17 @@
   let showStops   = $state(true);
   let showHeatmap = $state(false);
 
-  // ── Checked state (shape group keys) ─────────────────────────────────────────
+  // ── Checked state ─────────────────────────────────────────────────────────────
 
   let checkedKeys = $state(new Set<string>());
 
-  // When new data loads, default all keys to checked
   $effect(() => {
     if (gtfsData) checkedKeys = new Set(gtfsData.allShapeKeys);
   });
 
   function toggleKeys(keys: string[], on: boolean) {
     const next = new Set(checkedKeys);
-    for (const k of keys) {
-      if (on) next.add(k);
-      else next.delete(k);
-    }
+    for (const k of keys) { if (on) next.add(k); else next.delete(k); }
     checkedKeys = next;
   }
 
@@ -63,16 +72,11 @@
     if (!gtfsData) return new Set<string>();
     const result = new Set<string>();
     for (const tripId of activeTripIds) {
-      for (const stopId of gtfsData.tripStops.get(tripId) ?? []) {
-        result.add(stopId);
-      }
+      for (const stopId of gtfsData.tripStops.get(tripId) ?? []) result.add(stopId);
     }
     return result;
   });
 
-  // Heatmap weights: only computed when heatmap is visible (stop_times can be huge).
-  // Recomputes active trips inline to avoid referencing another $derived inside this one,
-  // which causes Svelte 5 to fail tracking the conditional dependency.
   const stopWeights = $derived.by(() => {
     if (!showHeatmap || !gtfsData) return new Map<string, number>();
     const activeTrips = new Set<string>();
@@ -92,33 +96,46 @@
 
   let popupCard = $state<CardEntry | null>(null);
 
-  function handleStopClick(stopId: string) {
-    popupCard = { type: 'stop', stopId };
-  }
+  function handleStopClick(stopId: string) { popupCard = { type: 'stop', stopId }; }
 
   function handleShapeClick(shapeId: string) {
     if (!gtfsData) return;
     for (const trip of gtfsData.trips.values()) {
-      if (trip.shape_id === shapeId) {
-        popupCard = { type: 'route', routeId: trip.route_id };
-        return;
-      }
+      if (trip.shape_id === shapeId) { popupCard = { type: 'route', routeId: trip.route_id }; return; }
     }
   }
 
   // ── Loading ───────────────────────────────────────────────────────────────────
 
-  onMount(() => {
-    const params = new URLSearchParams(window.location.search);
-    const source = params.get('source');
-    if (source) fetchAndLoad(source);
-    else showPrompt = true;
+  onMount(async () => {
+    const params  = new URLSearchParams(window.location.search);
+    const source  = params.get('source');
+    const compare = params.get('compare');
+    const token   = params.get('gh_token');
+    if (token) ghToken = token;
+
+    if (!source && !compare) { showPrompt = true; return; }
+
+    loading = true; error = null;
+    await Promise.all([
+      source
+        ? loadGtfsFromUrl(source, token ?? undefined)
+            .then(d => { gtfsData = d; })
+            .catch(e => { error = e instanceof Error ? e.message : 'Failed to load GTFS from URL'; showPrompt = true; })
+        : Promise.resolve(),
+      compare
+        ? loadGtfsFromUrl(compare, token ?? undefined)
+            .then(d => { compareData = d; })
+            .catch(e => { compareError = e instanceof Error ? e.message : 'Failed to load comparison feed'; })
+        : Promise.resolve(),
+    ]);
+    loading = false;
   });
 
   async function fetchAndLoad(url: string) {
     loading = true; error = null;
     try {
-      gtfsData = await loadGtfsFromUrl(url);
+      gtfsData = await loadGtfsFromUrl(url, ghToken ?? undefined);
       showPrompt = false;
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to load GTFS from URL';
@@ -135,16 +152,42 @@
       error = e instanceof Error ? e.message : 'Failed to parse GTFS file';
     } finally { loading = false; }
   }
+
+  // ── Compare feed loading ──────────────────────────────────────────────────────
+
+  async function handleCompareFileSelect(blob: Blob) {
+    compareLoading = true; compareError = null;
+    try {
+      compareData = await loadGtfsFromBlob(blob);
+      showCompare = false;
+    } catch (e) {
+      compareError = e instanceof Error ? e.message : 'Failed to parse comparison feed';
+    } finally { compareLoading = false; }
+  }
+
+  async function handleCompareUrlSubmit(url: string) {
+    compareLoading = true; compareError = null;
+    try {
+      compareData = await loadGtfsFromUrl(url, ghToken ?? undefined);
+      showCompare = false;
+    } catch (e) {
+      compareError = e instanceof Error ? e.message : 'Failed to load comparison feed';
+    } finally { compareLoading = false; }
+  }
 </script>
 
 <div class="flex h-screen w-screen overflow-hidden bg-slate-950 text-white">
   <Sidebar
     {gtfsData}
     {checkedKeys}
+    {compareData}
     bind:showShapes
     bind:showStops
     bind:showHeatmap
     onToggleKeys={toggleKeys}
+    onLoadCompare={() => { showCompare = true; compareError = null; }}
+    onViewDiff={() => { popupCard = { type: 'diff-summary' }; }}
+    onClearCompare={() => { compareData = null; }}
   />
 
   <div class="relative flex-1">
@@ -156,6 +199,8 @@
       {showShapes}
       {showStops}
       {showHeatmap}
+      {diff}
+      {compareData}
       onStopClick={handleStopClick}
       onShapeClick={handleShapeClick}
     />
@@ -182,10 +227,22 @@
     {/if}
   </div>
 
+  {#if showCompare}
+    <ComparePrompt
+      loading={compareLoading}
+      error={compareError}
+      onFileSelect={handleCompareFileSelect}
+      onUrlSubmit={handleCompareUrlSubmit}
+      onClose={() => { showCompare = false; compareError = null; }}
+    />
+  {/if}
+
   {#if popupCard && gtfsData}
     <Popup
       initialCard={popupCard}
       {gtfsData}
+      {diff}
+      {compareData}
       onClose={() => (popupCard = null)}
     />
   {/if}

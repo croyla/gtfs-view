@@ -1,17 +1,26 @@
 <script lang="ts">
   import type { GtfsData } from './types';
   import type { CardEntry } from './popupTypes';
+  import type { GtfsDiff } from './diffGtfs';
   import StopCard from './StopCard.svelte';
   import RouteCard from './RouteCard.svelte';
   import TripCard from './TripCard.svelte';
+  import DiffSummaryCard from './DiffSummaryCard.svelte';
+  import DiffStopsCard from './DiffStopsCard.svelte';
+  import DiffRoutesCard from './DiffRoutesCard.svelte';
+  import DiffTripsCard from './DiffTripsCard.svelte';
 
   let {
     initialCard,
     gtfsData,
+    diff = null,
+    compareData = null,
     onClose,
   }: {
     initialCard: CardEntry;
     gtfsData: GtfsData;
+    diff?: GtfsDiff | null;
+    compareData?: GtfsData | null;
     onClose: () => void;
   } = $props();
 
@@ -19,13 +28,8 @@
 
   $effect(() => { stack = [initialCard]; });
 
-  function navigate(card: CardEntry) {
-    stack = [...stack, card];
-  }
-
-  function back() {
-    if (stack.length > 1) stack = stack.slice(0, -1);
-  }
+  function navigate(card: CardEntry) { stack = [...stack, card]; }
+  function back() { if (stack.length > 1) stack = stack.slice(0, -1); }
 
   const current = $derived(stack[stack.length - 1]);
 
@@ -41,8 +45,12 @@
     }
     if (card.type === 'trip') {
       const trip = gtfsData.trips.get(card.tripId);
-      return trip?.trip_headsign ?? `Trip`;
+      return trip?.trip_headsign ?? 'Trip';
     }
+    if (card.type === 'diff-summary') return 'Feed diff';
+    if (card.type === 'diff-stops')   return 'Stops diff';
+    if (card.type === 'diff-routes')  return 'Routes diff';
+    if (card.type === 'diff-trips')   return 'Trips diff';
     return '';
   });
 
@@ -58,10 +66,8 @@
   aria-modal="true"
   onclick={handleBackdropClick}
 >
-  <!-- Backdrop -->
   <div class="absolute inset-0 bg-black/60 backdrop-blur-sm"></div>
 
-  <!-- Card -->
   <div class="relative z-10 w-full max-w-lg bg-slate-900 rounded-2xl shadow-2xl border border-slate-700 flex flex-col max-h-[85vh]">
     <!-- Header -->
     <div class="flex items-center gap-2 px-5 py-3.5 border-b border-slate-700 shrink-0">
@@ -99,6 +105,14 @@
         <RouteCard routeId={current.routeId} {gtfsData} onNavigate={navigate} />
       {:else if current.type === 'trip'}
         <TripCard tripId={current.tripId} {gtfsData} onNavigate={navigate} />
+      {:else if current.type === 'diff-summary' && diff}
+        <DiffSummaryCard {diff} onNavigate={navigate} />
+      {:else if current.type === 'diff-stops' && diff && compareData}
+        <DiffStopsCard filter={current.filter} {diff} {gtfsData} {compareData} onNavigate={navigate} />
+      {:else if current.type === 'diff-routes' && diff && compareData}
+        <DiffRoutesCard filter={current.filter} {diff} {gtfsData} {compareData} onNavigate={navigate} />
+      {:else if current.type === 'diff-trips' && diff && compareData}
+        <DiffTripsCard filter={current.filter} {diff} {gtfsData} {compareData} onNavigate={navigate} />
       {/if}
     </div>
   </div>

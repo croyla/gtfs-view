@@ -62,24 +62,53 @@ export async function loadGtfsFromBlob(blob: Blob): Promise<GtfsData> {
   });
 }
 
-// Rewrite github.com raw/blob URLs to raw.githubusercontent.com to avoid
-// CORS issues that arise from following cross-origin redirects.
-function resolveUrl(url: string): string {
-  const m = url.match(/^https?:\/\/github\.com\/([^/]+\/[^/]+)\/(raw|blob)\/(.+)$/);
-  if (m) return `https://raw.githubusercontent.com/${m[1]}/${m[3]}`;
-  return url;
+// Parse a github.com blob/raw or raw.githubusercontent.com URL into owner, repo, and the
+// opaque "rest" segment (everything after owner/repo/). Branch names can contain slashes,
+// so we cannot split ref vs. path here — that is resolved later with iterative probing.
+function parseGithubUrl(url: string): { owner: string; repo: string; rest: string } | null {
+  const ghCom = url.match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/(raw|blob)\/(.+)$/);
+  if (ghCom) return { owner: ghCom[1], repo: ghCom[2], rest: ghCom[4] };
+  const rawCdn = url.match(/^https?:\/\/raw\.githubusercontent\.com\/([^/]+)\/([^/]+)\/(.+)$/);
+  if (rawCdn) return { owner: rawCdn[1], repo: rawCdn[2], rest: rawCdn[3] };
+  return null;
+}
+
+// Fetch a GitHub file using the Contents API with Accept: application/vnd.github.raw+json,
+// which returns the raw file bytes directly from api.github.com (CORS-safe).
+// Tries ref/path splits shortest-ref-first to handle branch names with slashes.
+async function fetchGithubWithToken(owner: string, repo: string, rest: string, token: string): Promise<Response> {
+  const parts = rest.split('/');
+  for (let refLen = 1; refLen <= parts.length - 1; refLen++) {
+    const ref  = parts.slice(0, refLen).join('/');
+    const path = parts.slice(refLen).join('/');
+    // Slashes in `ref` are intentionally not percent-encoded — GitHub does not treat %2F
+    // the same as / in query parameters.
+    const apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${path}?ref=${ref}`;
+    const response = await fetch(apiUrl, {
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github.raw+json' },
+    });
+    if (response.status === 404) continue;
+    return response;
+  }
+  throw new Error('Server returned 404 Not Found');
 }
 
 export async function loadGtfsFromUrl(url: string, token?: string): Promise<GtfsData> {
-  const resolved = resolveUrl(url.trim());
-  const headers: HeadersInit = token ? { Authorization: `token ${token}` } : {};
+  const trimmed = url.trim();
+  const gh = parseGithubUrl(trimmed);
+
   let response: Response;
   try {
-    response = await fetch(resolved, { redirect: 'follow', headers });
-  } catch {
-    throw new Error(
-      'Network error — this may be a CORS restriction. Try downloading the file and uploading it instead.',
-    );
+    if (gh && token) {
+      response = await fetchGithubWithToken(gh.owner, gh.repo, gh.rest, token);
+    } else {
+      const resolved = gh ? `https://raw.githubusercontent.com/${gh.owner}/${gh.repo}/${gh.rest}` : trimmed;
+      response = await fetch(resolved, { redirect: 'follow' });
+    }
+  } catch (err) {
+    if (err instanceof Error && (err.message.startsWith('Server returned') || err.message.startsWith('GitHub')))
+      throw err;
+    throw new Error('Network error — this may be a CORS restriction. Try downloading the file and uploading it instead.');
   }
   if (!response.ok) throw new Error(`Server returned ${response.status} ${response.statusText}`);
   const blob = await response.blob();

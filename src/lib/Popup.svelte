@@ -100,11 +100,11 @@
     <!-- Content -->
     <div class="flex-1 overflow-y-auto px-5 py-4">
       {#if current.type === 'stop'}
-        <StopCard stopId={current.stopId} {gtfsData} onNavigate={navigate} />
+        <StopCard stopId={current.stopId} {gtfsData} {diff} onNavigate={navigate} />
       {:else if current.type === 'route'}
-        <RouteCard routeId={current.routeId} {gtfsData} onNavigate={navigate} />
+        <RouteCard routeId={current.routeId} {gtfsData} {diff} {compareData} onNavigate={navigate} />
       {:else if current.type === 'trip'}
-        <TripCard tripId={current.tripId} {gtfsData} onNavigate={navigate} />
+        <TripCard tripId={current.tripId} {gtfsData} {diff} onNavigate={navigate} />
       {:else if current.type === 'diff-summary' && diff}
         <DiffSummaryCard {diff} onNavigate={navigate} />
       {:else if current.type === 'diff-stops' && diff && compareData}

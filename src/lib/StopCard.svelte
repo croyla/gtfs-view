@@ -1,17 +1,26 @@
 <script lang="ts">
   import type { GtfsData } from './types';
   import type { CardEntry } from './popupTypes';
+  import type { GtfsDiff } from './diffGtfs';
   import { haversineKm, formatTime, parseTimeMin } from './popupUtils';
 
   let {
     stopId,
     gtfsData,
+    diff = null,
     onNavigate,
   }: {
     stopId: string;
     gtfsData: GtfsData;
+    diff?: GtfsDiff | null;
     onNavigate: (card: CardEntry) => void;
   } = $props();
+
+  const ROW_DIFF_CLASS: Record<string, string> = {
+    added:   'border-l-2 border-emerald-500',
+    removed: 'border-l-2 border-red-500',
+    changed: 'border-l-2 border-sky-500',
+  };
 
   let activeTab = $state<'overview' | 'timetable'>('overview');
 
@@ -23,6 +32,7 @@
     const routeIds = new Set<string>();
     const rows: {
       tripId: string;
+      routeId: string;
       key: string;
       routeShort: string;
       routeColor: string | undefined;
@@ -41,6 +51,7 @@
       const time = st.departure_time || st.arrival_time;
       rows.push({
         tripId: st.trip_id,
+        routeId: trip.route_id,
         key: `${st.trip_id}:${st.stop_sequence}`,
         routeShort: route?.route_short_name || trip.route_id,
         routeColor: route?.route_color,
@@ -137,19 +148,19 @@
           </thead>
           <tbody>
             {#each stopInfo.rows as row (row.key)}
+              {@const tripDiffKind = diff?.trips.get(row.tripId)?.kind}
               <tr
-                class="border-t border-slate-700/40 hover:bg-slate-800 cursor-pointer transition-colors"
+                class="border-t border-slate-700/40 hover:bg-slate-800 cursor-pointer transition-colors {tripDiffKind ? ROW_DIFF_CLASS[tripDiffKind] : ''}"
                 onclick={() => onNavigate({ type: 'trip', tripId: row.tripId })}
               >
                 <td class="py-1.5 pr-3">
-                  {#if row.routeColor}
-                    <span
-                      class="inline-flex items-center gap-1.5 font-medium"
-                      style="color: {row.routeColor}"
-                    >{row.routeShort}</span>
-                  {:else}
-                    <span class="font-medium text-slate-200">{row.routeShort}</span>
-                  {/if}
+                  <button
+                    class="font-medium hover:underline"
+                    style={row.routeColor ? `color: #${row.routeColor}` : ''}
+                    onclick={(e) => { e.stopPropagation(); onNavigate({ type: 'route', routeId: row.routeId }); }}
+                  >
+                    {row.routeShort}
+                  </button>
                 </td>
                 <td class="py-1.5 pr-3 text-slate-300 max-w-[160px] truncate">{row.destination}</td>
                 <td class="py-1.5 text-right tabular-nums text-slate-200">{formatTime(row.time)}</td>

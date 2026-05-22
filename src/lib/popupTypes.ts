@@ -1,4 +1,4 @@
-export type DiffFilter = 'all' | 'added' | 'removed' | 'moved' | 'changed';
+export type DiffFilter = 'all' | 'added' | 'removed' | 'moved' | 'changed' | 'unchanged';
 
 export type CardEntry =
   | { type: 'stop';  stopId: string }

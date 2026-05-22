@@ -56,15 +56,18 @@ export interface GtfsDiff {
   trips:  Map<string, TripDiff>;
   shapes: Map<string, ShapeDiffKind>;
 
-  stopsAdded:   number;
-  stopsRemoved: number;
-  stopsMoved:   number;
-  routesAdded:   number;
-  routesRemoved: number;
-  routesChanged: number;
-  tripsAdded:   number;
-  tripsRemoved: number;
-  tripsChanged: number;
+  stopsAdded:     number;
+  stopsRemoved:   number;
+  stopsMoved:     number;
+  stopsUnchanged: number;
+  routesAdded:     number;
+  routesRemoved:   number;
+  routesChanged:   number;
+  routesUnchanged: number;
+  tripsAdded:     number;
+  tripsRemoved:   number;
+  tripsChanged:   number;
+  tripsUnchanged: number;
   shapesAdded:   number;
   shapesRemoved: number;
   shapesChanged: number;
@@ -193,17 +196,24 @@ export function computeDiff(oldData: GtfsData, newData: GtfsData): GtfsDiff {
     [...m.values()].filter(v => v.kind === k).length;
   const countShape = (k: ShapeDiffKind) => [...shapes.values()].filter(v => v === k).length;
 
+  const stopsAdded   = countKind(stops, 'added');
+  const stopsRemoved = countKind(stops, 'removed');
+  const stopsMoved   = countKind(stops, 'moved');
+  const routesAdded   = countKind(routes, 'added');
+  const routesRemoved = countKind(routes, 'removed');
+  const routesChanged = countKind(routes, 'changed');
+  const tripsAdded   = countKind(trips, 'added');
+  const tripsRemoved = countKind(trips, 'removed');
+  const tripsChanged = countKind(trips, 'changed');
+
   return {
     stops, routes, trips, shapes,
-    stopsAdded:   countKind(stops, 'added'),
-    stopsRemoved: countKind(stops, 'removed'),
-    stopsMoved:   countKind(stops, 'moved'),
-    routesAdded:   countKind(routes, 'added'),
-    routesRemoved: countKind(routes, 'removed'),
-    routesChanged: countKind(routes, 'changed'),
-    tripsAdded:   countKind(trips, 'added'),
-    tripsRemoved: countKind(trips, 'removed'),
-    tripsChanged: countKind(trips, 'changed'),
+    stopsAdded, stopsRemoved, stopsMoved,
+    stopsUnchanged: newData.stops.size - stopsAdded - stopsMoved,
+    routesAdded, routesRemoved, routesChanged,
+    routesUnchanged: newData.routes.size - routesAdded - routesChanged,
+    tripsAdded, tripsRemoved, tripsChanged,
+    tripsUnchanged: newData.trips.size - tripsAdded - tripsChanged,
     shapesAdded:   countShape('added'),
     shapesRemoved: countShape('removed'),
     shapesChanged: countShape('changed'),

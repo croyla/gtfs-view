@@ -1,17 +1,28 @@
 <script lang="ts">
   import type { GtfsData } from './types';
   import type { CardEntry } from './popupTypes';
+  import type { GtfsDiff } from './diffGtfs';
   import { formatTime, formatDuration, parseTimeMin, shapeDistanceKm } from './popupUtils';
 
   let {
     routeId,
     gtfsData,
+    diff = null,
+    compareData = null,
     onNavigate,
   }: {
     routeId: string;
     gtfsData: GtfsData;
+    diff?: GtfsDiff | null;
+    compareData?: GtfsData | null;
     onNavigate: (card: CardEntry) => void;
   } = $props();
+
+  const TRIP_DIFF_COLOR: Record<string, string> = {
+    added:   'border-l-2 border-emerald-500',
+    removed: 'border-l-2 border-red-500',
+    changed: 'border-l-2 border-sky-500',
+  };
 
   let activeTab = $state<'overview' | 'trips'>('overview');
 
@@ -186,8 +197,9 @@
             </div>
             <div class="space-y-0">
               {#each group.trips as t (t.tripId)}
+                {@const tripDiffKind = diff?.trips.get(t.tripId)?.kind}
                 <button
-                  class="w-full flex items-center justify-between px-3 py-1.5 rounded-lg hover:bg-slate-800 text-left transition-colors"
+                  class="w-full flex items-center justify-between px-3 py-1.5 rounded-lg hover:bg-slate-800 text-left transition-colors pl-3 {tripDiffKind ? TRIP_DIFF_COLOR[tripDiffKind] : ''}"
                   onclick={() => onNavigate({ type: 'trip', tripId: t.tripId })}
                 >
                   <span class="text-sm tabular-nums text-slate-200">{formatTime(t.departureTime)}</span>

@@ -2,7 +2,17 @@
   import type { GtfsData } from './types';
   import type { GtfsDiff, TripDiffKind } from './diffGtfs';
   import type { CardEntry, DiffFilter } from './popupTypes';
-  import { formatTime } from './popupUtils';
+  import { formatTime, parseTimeMin } from './popupUtils';
+
+  function tripTimes(data: GtfsData, tripId: string): { start: string; end: string } | null {
+    const sts = data.stopTimesByTrip.get(tripId);
+    if (!sts || sts.length === 0) return null;
+    const sorted = [...sts].sort((a, b) => a.stop_sequence - b.stop_sequence);
+    const start = sorted[0].departure_time || sorted[0].arrival_time;
+    const end = sorted[sorted.length - 1].arrival_time || sorted[sorted.length - 1].departure_time;
+    if (!start || !end) return null;
+    return { start, end };
+  }
 
   let {
     filter,
@@ -19,36 +29,73 @@
   } = $props();
 
   const TABS: { f: DiffFilter; label: string }[] = [
-    { f: 'all',     label: 'All' },
-    { f: 'added',   label: 'Added' },
-    { f: 'removed', label: 'Removed' },
-    { f: 'changed', label: 'Changed' },
+    { f: 'all',       label: 'All' },
+    { f: 'added',     label: 'Added' },
+    { f: 'removed',   label: 'Removed' },
+    { f: 'changed',   label: 'Changed' },
+    { f: 'unchanged', label: 'Same' },
   ];
 
   let activeFilter = $state<DiffFilter>(filter);
   let expandedRoutes = $state(new Set<string>());
 
-  // Group changed trips by route
-  const byRoute = $derived.by(() => {
-    const groups = new Map<string, { routeId: string; tripId: string; kind: TripDiffKind; headsign: string | null; changeCount: number }[]>();
+  type TripKind = TripDiffKind | 'unchanged';
 
-    for (const [tripId, td] of diff.trips) {
-      if (activeFilter !== 'all' && td.kind !== activeFilter) continue;
-      const routeId = td.routeId;
-      if (!groups.has(routeId)) groups.set(routeId, []);
-      groups.get(routeId)!.push({
-        routeId, tripId, kind: td.kind,
-        headsign: td.trip.trip_headsign ?? null,
-        changeCount: td.stopChanges?.length ?? 0,
-      });
+  type TripTimes = { start: string; end: string } | null;
+
+  type TripEntry = {
+    routeId: string;
+    tripId: string;
+    kind: TripKind;
+    headsign: string | null;
+    changeCount: number;
+    times: TripTimes;
+    oldTimes: TripTimes;
+  };
+
+  // Group trips by route
+  const byRoute = $derived.by(() => {
+    const groups = new Map<string, TripEntry[]>();
+
+    if (activeFilter === 'unchanged') {
+      for (const [tripId, trip] of compareData.trips) {
+        if (diff.trips.has(tripId)) continue;
+        if (!gtfsData.trips.has(tripId)) continue;
+        const routeId = trip.route_id;
+        if (!groups.has(routeId)) groups.set(routeId, []);
+        groups.get(routeId)!.push({
+          routeId, tripId, kind: 'unchanged',
+          headsign: trip.trip_headsign ?? null,
+          changeCount: 0,
+          times: tripTimes(compareData, tripId),
+          oldTimes: null,
+        });
+      }
+    } else {
+      for (const [tripId, td] of diff.trips) {
+        if (activeFilter !== 'all' && td.kind !== activeFilter) continue;
+        const routeId = td.routeId;
+        if (!groups.has(routeId)) groups.set(routeId, []);
+        const newTimes = td.kind !== 'removed' ? tripTimes(compareData, tripId) : null;
+        const oldTimesVal = td.kind !== 'added' ? tripTimes(gtfsData, tripId) : null;
+        groups.get(routeId)!.push({
+          routeId, tripId, kind: td.kind,
+          headsign: td.trip.trip_headsign ?? null,
+          changeCount: td.stopChanges?.length ?? 0,
+          times: td.kind === 'removed' ? oldTimesVal : newTimes,
+          oldTimes: td.kind === 'changed' ? oldTimesVal : null,
+        });
+      }
     }
 
-    // Sort routes by ID
     return [...groups.entries()]
       .sort((a, b) => a[0].localeCompare(b[0]))
       .map(([routeId, trips]) => {
         const route = compareData.routes.get(routeId) ?? gtfsData.routes.get(routeId);
-        return { routeId, route, trips: trips.sort((a, b) => (a.headsign ?? '').localeCompare(b.headsign ?? '')) };
+        const sorted = trips.sort((a, b) =>
+          parseTimeMin(a.times?.start ?? '') - parseTimeMin(b.times?.start ?? ''),
+        );
+        return { routeId, route, trips: sorted };
       });
   });
 
@@ -58,20 +105,22 @@
     expandedRoutes = next;
   }
 
-  const BADGE: Record<TripDiffKind, string> = {
-    added:   'bg-emerald-950/60 text-emerald-400',
-    removed: 'bg-red-950/60 text-red-400',
-    changed: 'bg-amber-950/60 text-amber-400',
+  const BADGE: Record<TripKind, string> = {
+    added:     'bg-emerald-950/60 text-emerald-400',
+    removed:   'bg-red-950/60 text-red-400',
+    changed:   'bg-amber-950/60 text-amber-400',
+    unchanged: 'bg-slate-800 text-slate-400',
   };
 
-  const DOT: Record<TripDiffKind, string> = {
-    added:   '#22c55e',
-    removed: '#ef4444',
-    changed: '#fbbf24',
+  const DOT: Record<TripKind, string> = {
+    added:     '#22c55e',
+    removed:   '#ef4444',
+    changed:   '#fbbf24',
+    unchanged: '#ffffff',
   };
 
   function routeKindSummary(trips: typeof byRoute[0]['trips']): string {
-    const counts: Partial<Record<TripDiffKind, number>> = {};
+    const counts: Partial<Record<TripKind, number>> = {};
     for (const t of trips) counts[t.kind] = (counts[t.kind] ?? 0) + 1;
     return Object.entries(counts).map(([k, n]) => `${n} ${k}`).join(', ');
   }
@@ -123,6 +172,8 @@
         {#if expanded}
           <div class="border-t border-slate-700">
             {#each trips as t (t.tripId)}
+              {@const timesChanged = t.kind === 'changed' && t.oldTimes && t.times &&
+                (t.oldTimes.start !== t.times.start || t.oldTimes.end !== t.times.end)}
               <button
                 class="w-full flex items-center gap-3 px-4 py-2 hover:bg-slate-800 transition-colors text-left border-b border-slate-800 last:border-0"
                 onclick={() => onNavigate({ type: 'trip', tripId: t.tripId })}
@@ -130,6 +181,18 @@
                 <span class="h-2 w-2 shrink-0 rounded-full" style="background:{DOT[t.kind]}"></span>
                 <div class="flex-1 min-w-0">
                   <p class="text-xs text-slate-300 truncate">{t.headsign ?? t.tripId}</p>
+                  {#if timesChanged}
+                    <p class="text-[10px] text-slate-500 line-through tabular-nums">
+                      {formatTime(t.oldTimes!.start)} → {formatTime(t.oldTimes!.end)}
+                    </p>
+                    <p class="text-[10px] text-sky-400 tabular-nums">
+                      {formatTime(t.times!.start)} → {formatTime(t.times!.end)}
+                    </p>
+                  {:else if t.times}
+                    <p class="text-[10px] text-slate-500 tabular-nums">
+                      {formatTime(t.times.start)} → {formatTime(t.times.end)}
+                    </p>
+                  {/if}
                   {#if t.kind === 'changed' && t.changeCount > 0}
                     <p class="text-[10px] text-slate-500">{t.changeCount} stop change{t.changeCount !== 1 ? 's' : ''}</p>
                   {/if}

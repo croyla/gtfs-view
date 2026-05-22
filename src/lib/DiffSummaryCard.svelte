@@ -21,27 +21,30 @@
       label: 'Stops',
       type: 'diff-stops',
       rows: [
-        { filter: 'added',   label: 'Added',   count: diff.stopsAdded,   color: 'text-emerald-400' },
-        { filter: 'removed', label: 'Removed', count: diff.stopsRemoved, color: 'text-red-400' },
-        { filter: 'moved',   label: 'Moved',   count: diff.stopsMoved,   color: 'text-sky-400' },
+        { filter: 'added',     label: 'Added',   count: diff.stopsAdded,     color: 'text-emerald-400' },
+        { filter: 'removed',   label: 'Removed', count: diff.stopsRemoved,   color: 'text-red-400' },
+        { filter: 'moved',     label: 'Moved',   count: diff.stopsMoved,     color: 'text-sky-400' },
+        { filter: 'unchanged', label: 'Same',    count: diff.stopsUnchanged, color: 'text-slate-300' },
       ],
     },
     {
       label: 'Routes',
       type: 'diff-routes',
       rows: [
-        { filter: 'added',   label: 'Added',   count: diff.routesAdded,   color: 'text-emerald-400' },
-        { filter: 'removed', label: 'Removed', count: diff.routesRemoved, color: 'text-red-400' },
-        { filter: 'changed', label: 'Changed', count: diff.routesChanged, color: 'text-sky-400' },
+        { filter: 'added',     label: 'Added',   count: diff.routesAdded,     color: 'text-emerald-400' },
+        { filter: 'removed',   label: 'Removed', count: diff.routesRemoved,   color: 'text-red-400' },
+        { filter: 'changed',   label: 'Changed', count: diff.routesChanged,   color: 'text-sky-400' },
+        { filter: 'unchanged', label: 'Same',    count: diff.routesUnchanged, color: 'text-slate-300' },
       ],
     },
     {
       label: 'Trips',
       type: 'diff-trips',
       rows: [
-        { filter: 'added',   label: 'Added',   count: diff.tripsAdded,   color: 'text-emerald-400' },
-        { filter: 'removed', label: 'Removed', count: diff.tripsRemoved, color: 'text-red-400' },
-        { filter: 'changed', label: 'Changed', count: diff.tripsChanged, color: 'text-amber-400' },
+        { filter: 'added',     label: 'Added',   count: diff.tripsAdded,     color: 'text-emerald-400' },
+        { filter: 'removed',   label: 'Removed', count: diff.tripsRemoved,   color: 'text-red-400' },
+        { filter: 'changed',   label: 'Changed', count: diff.tripsChanged,   color: 'text-amber-400' },
+        { filter: 'unchanged', label: 'Same',    count: diff.tripsUnchanged, color: 'text-slate-300' },
       ],
     },
   ];
@@ -74,7 +77,7 @@
 
       {#if total > 0}
         <!-- Change counts -->
-        <div class="border-t border-slate-700 px-4 py-2 grid grid-cols-3 gap-2">
+        <div class="border-t border-slate-700 px-4 py-2 grid grid-cols-2 gap-2">
           {#each section.rows as row (row.filter)}
             {#if row.count > 0}
               <button

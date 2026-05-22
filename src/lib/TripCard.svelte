@@ -1,17 +1,34 @@
 <script lang="ts">
   import type { GtfsData } from './types';
   import type { CardEntry } from './popupTypes';
+  import type { GtfsDiff } from './diffGtfs';
   import { formatTime } from './popupUtils';
 
   let {
     tripId,
     gtfsData,
+    diff = null,
     onNavigate,
   }: {
     tripId: string;
     gtfsData: GtfsData;
+    diff?: GtfsDiff | null;
     onNavigate: (card: CardEntry) => void;
   } = $props();
+
+  const stopDiffBySeq = $derived.by(() => {
+    const changes = diff?.trips.get(tripId)?.stopChanges;
+    if (!changes) return new Map<number, string>();
+    const m = new Map<number, string>();
+    for (const c of changes) m.set(c.sequence, c.kind);
+    return m;
+  });
+
+  const STOP_DIFF_BORDER: Record<string, string> = {
+    'stop-removed':    'border-l-2 border-red-500',
+    'timing-changed':  'border-l-2 border-sky-500',
+    'stop-added':      'border-l-2 border-emerald-500',
+  };
 
   const tripData = $derived.by(() => {
     const trip = gtfsData.trips.get(tripId);
@@ -34,13 +51,16 @@
     {#if trip.trip_headsign}
       <p class="text-xs text-slate-400">Towards <span class="text-slate-200">{trip.trip_headsign}</span></p>
     {/if}
-    <p class="text-xs text-slate-500">
+    <button
+      class="text-xs text-slate-500 hover:text-slate-300 transition-colors text-left hover:underline"
+      onclick={() => onNavigate({ type: 'route', routeId: trip.route_id })}
+    >
       {route?.route_short_name ? `Route ${route.route_short_name}` : ''}
       {route?.route_long_name ? `· ${route.route_long_name}` : ''}
       {#if !route?.route_short_name && !route?.route_long_name}
         Route {trip.route_id}
       {/if}
-    </p>
+    </button>
   </div>
 
   <p class="text-[10px] uppercase tracking-wide text-slate-500 mb-2">Stops ({stopTimes.length})</p>
@@ -55,8 +75,9 @@
 
         <div class="space-y-0">
           {#each stopTimes as st, i (st.stop_sequence)}
+            {@const stopDiffKind = stopDiffBySeq.get(st.stop_sequence)}
             <button
-              class="relative w-full flex items-start gap-3 py-2 pl-1 pr-2 rounded-lg hover:bg-slate-800 text-left transition-colors group"
+              class="relative w-full flex items-start gap-3 py-2 pl-1 pr-2 rounded-lg hover:bg-slate-800 text-left transition-colors group {stopDiffKind ? STOP_DIFF_BORDER[stopDiffKind] : ''}"
               onclick={() => onNavigate({ type: 'stop', stopId: st.stop_id })}
             >
               <!-- Timeline dot -->

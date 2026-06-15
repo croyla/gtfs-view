@@ -62,7 +62,7 @@ function parseCSV(text: string): Record<string, string>[] {
 
 // ── Tree builder ──────────────────────────────────────────────────────────────
 
-function buildTree(
+export function buildTree(
   agencies: Map<string, Agency>,
   routes: Map<string, Route>,
   trips: Map<string, Trip>,

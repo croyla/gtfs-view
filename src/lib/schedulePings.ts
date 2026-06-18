@@ -5,18 +5,15 @@ import { haversineKm, parseTimeMin } from './popupUtils';
 // ── Matching constants ────────────────────────────────────────────────────────
 
 const SEQ_STOP_KM         = 0.15;  // 150 m – ping-to-stop match radius
-const REVERSAL_THRESHOLD  = 3;     // consecutive backward steps before splitting a run
-const BLOCK_PRE_SLACK_MIN = 10;    // {user-configurable} minutes before block start to include pings
+const BLOCK_PRE_SLACK_MIN = 10;    // minutes before block start to include pings
 
 // ── Interfaces ────────────────────────────────────────────────────────────────
 
-/** A raw ping with its local-time pre-computed, sorted ascending. */
 export interface PingWithTime {
   p: VehiclePosition;
   t: number;  // minutes since local midnight
 }
 
-/** One stop's match result from the sequential algorithm. */
 export interface StopMatch {
   stopIndex:    number;
   stopId:       string;
@@ -29,21 +26,16 @@ export interface StopMatch {
   visited:      boolean;
 }
 
-/**
- * All stop matches and raw pings assigned to one trip after the sequential
- * algorithm. Pings outside every trip's observation window are not stored.
- */
 export interface TripRecord {
   tid:         string;
   stopMatches: StopMatch[];
   pings:       VehiclePosition[];  // all pings in [firstVisitedT, lastVisitedT]
 }
 
-/** Output of the ping-matching phase, before any metric scoring. */
 export interface BlockPingData {
   tripRecords:  TripRecord[];
-  skippedCount: number;   // trips with no ping match at all
-  error?:       'no_match'; // set when no pings landed near any stop (3.C)
+  skippedCount: number;
+  error?:       'no_match';
 }
 
 // ── Private stop geometry ─────────────────────────────────────────────────────
@@ -59,11 +51,6 @@ interface StopInfo {
 
 // ── Epoch → local-time conversion ────────────────────────────────────────────
 
-/**
- * Create a memoised epoch→minutes converter for a given timezone.
- * Build once per timezone; the returned function is O(1) after the first call
- * for each unique timestamp.
- */
 export function makeEpochToMin(tz: string): (epoch: number) => number {
   const fmt = new Intl.DateTimeFormat('en-US', {
     timeZone: tz, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
@@ -84,10 +71,6 @@ export function makeEpochToMin(tz: string): (epoch: number) => number {
 
 // ── Sorted ping builder ───────────────────────────────────────────────────────
 
-/**
- * Pre-compute local-time for every ping and sort ascending.
- * Build once per reactive cycle and share across all matching functions.
- */
 export function buildSortedPings(
   pings:      VehiclePosition[],
   epochToMin: (e: number) => number,
@@ -96,11 +79,6 @@ export function buildSortedPings(
     .map(p => ({ p, t: epochToMin(p.timestamp) }))
     .sort((a, b) => a.t - b.t);
 }
-
-
-
-
-
 
 // ── Binary search ─────────────────────────────────────────────────────────────
 
@@ -160,67 +138,24 @@ function getPingsInWindow(
   return result;
 }
 
-// ── Phase 1: Global stop-ping matching ────────────────────────────────────────
+// ── Stop schedule map ─────────────────────────────────────────────────────────
 
-/** For each (trip, stop) pair, collect all pings within SEQ_STOP_KM. */
-function buildGlobalStopMatches(
+function buildStopScheduleMap(
   allStopInfos: StopInfo[][],
-  pings:        PingWithTime[],
-): PingWithTime[][][] {
-  return allStopInfos.map(infos =>
-    infos.map(info =>
-      pings.filter(pw => haversineKm(info.lat, info.lon, pw.p.lat, pw.p.lon) < SEQ_STOP_KM),
-    ),
-  );
+): Map<string, Array<{ tripIdx: number; schedMin: number }>> {
+  const map = new Map<string, Array<{ tripIdx: number; schedMin: number }>>();
+  for (let t = 0; t < allStopInfos.length; t++) {
+    for (const info of allStopInfos[t]) {
+      if (!map.has(info.stopId)) map.set(info.stopId, []);
+      map.get(info.stopId)!.push({ tripIdx: t, schedMin: info.schedMin });
+    }
+  }
+  return map;
 }
 
-type BlockCoverage = 'correct' | 'partial' | 'inaccurate';
+// ── Journey builder ───────────────────────────────────────────────────────────
 
-function assessCoverage(globalMatches: PingWithTime[][][]): BlockCoverage {
-  const total   = globalMatches.reduce((s, trip) => s + trip.length, 0);
-  const matched = globalMatches.reduce((s, trip) => s + trip.filter(ps => ps.length > 0).length, 0);
-  if (matched === 0)     return 'inaccurate';
-  if (matched === total) return 'correct';
-  return 'partial';
-}
-
-// ── Phase 3A: Correct-run trip records ────────────────────────────────────────
-
-/**
- * All (trip, stop) pairs matched — for each, pick the ping closest to its
- * scheduled time. Temporal disambiguation handles stops shared across trips.
- */
-function buildCorrectTripRecords(
-  sortedTripIds: string[],
-  allStopInfos:  StopInfo[][],
-  globalMatches: PingWithTime[][][],
-  allPings:      PingWithTime[],
-): TripRecord[] {
-  return sortedTripIds.map((tid, i) => {
-    const stopMatches: StopMatch[] = allStopInfos[i].map((info, j) => {
-      const candidates = globalMatches[i][j];
-      if (candidates.length === 0) return emptyMatch(info, j);
-      const best = candidates.reduce((a, b) =>
-        Math.abs(a.t - info.schedMin) < Math.abs(b.t - info.schedMin) ? a : b,
-      );
-      return {
-        stopIndex: j, stopId: info.stopId, stopName: info.stopName,
-        schedMin: info.schedMin, cumDistKm: info.cumDist,
-        matchedPing: best.p, matchedPingT: best.t,
-        devMin: best.t - info.schedMin, visited: true,
-      };
-    });
-    const visited = stopMatches.filter(m => m.visited);
-    const pings = visited.length >= 2
-      ? getPingsInWindow(visited[0].matchedPingT!, visited.at(-1)!.matchedPingT!, allPings)
-      : visited.length === 1 ? [visited[0].matchedPing!] : [];
-    return { tid, stopMatches, pings };
-  });
-}
-
-// ── Phase 3B: Pattern-based partial matching ──────────────────────────────────
-
-interface StopVisit {
+interface JourneyStop {
   stopId: string;
   pingT:  number;
   ping:   VehiclePosition;
@@ -228,20 +163,20 @@ interface StopVisit {
 }
 
 /**
- * Walk pings in time order; when one lands within SEQ_STOP_KM of any block stop,
- * record the nearest stop. Deduplicate consecutive visits to the same stop,
- * keeping the closest ping.
+ * Walk pings in time order; for each ping, record the nearest block stop within
+ * SEQ_STOP_KM. Deduplicate consecutive visits to the same stop (keep the closest
+ * ping). The result is the vehicle's observed stop-visit sequence for the block.
  */
-function buildStopVisitSequence(
+function buildJourney(
   pings:        PingWithTime[],
   allStopInfos: StopInfo[][],
-): StopVisit[] {
+): JourneyStop[] {
   const stopById = new Map<string, StopInfo>();
   for (const infos of allStopInfos)
     for (const info of infos)
       if (!stopById.has(info.stopId)) stopById.set(info.stopId, info);
 
-  const visits: StopVisit[] = [];
+  const journey: JourneyStop[] = [];
   let lastStopId = '';
 
   for (const pw of pings) {
@@ -253,151 +188,82 @@ function buildStopVisitSequence(
     }
     if (!nearestId) continue;
 
-    if (nearestId === lastStopId && visits.length > 0) {
-      if (nearestDist < visits.at(-1)!.distKm)
-        visits[visits.length - 1] = { stopId: nearestId, pingT: pw.t, ping: pw.p, distKm: nearestDist };
+    if (nearestId === lastStopId && journey.length > 0) {
+      // Deduplicate: keep closest ping for the same consecutive stop
+      if (nearestDist < journey.at(-1)!.distKm)
+        journey[journey.length - 1] = { stopId: nearestId, pingT: pw.t, ping: pw.p, distKm: nearestDist };
     } else {
-      visits.push({ stopId: nearestId, pingT: pw.t, ping: pw.p, distKm: nearestDist });
+      journey.push({ stopId: nearestId, pingT: pw.t, ping: pw.p, distKm: nearestDist });
       lastStopId = nearestId;
     }
   }
-  return visits;
+  return journey;
 }
 
-/**
- * Split the stop-visit sequence into directional runs. A run boundary fires
- * when REVERSAL_THRESHOLD consecutive visits step backward relative to every
- * trip that shares both the previous and current stop.
- */
-function segmentVisitsIntoRuns(
-  visits:       StopVisit[],
-  allStopInfos: StopInfo[][],
-): StopVisit[][] {
-  if (visits.length === 0) return [];
-
-  const stopOrder = allStopInfos.map(infos => {
-    const m = new Map<string, number>();
-    infos.forEach((info, j) => m.set(info.stopId, j));
-    return m;
-  });
-
-  const runs: StopVisit[][] = [];
-  let currentRun: StopVisit[] = [visits[0]];
-  let reversalCount = 0;
-
-  for (let v = 1; v < visits.length; v++) {
-    const prevId = visits[v - 1].stopId;
-    const currId = visits[v].stopId;
-
-    let isForward = false;
-    let anyShared = false;
-    for (let t = 0; t < allStopInfos.length; t++) {
-      const pi = stopOrder[t].get(prevId);
-      const ci = stopOrder[t].get(currId);
-      if (pi !== undefined && ci !== undefined) {
-        anyShared = true;
-        if (ci > pi) { isForward = true; break; }
-      }
-    }
-
-    if (!anyShared || isForward) {
-      currentRun.push(visits[v]);
-      reversalCount = 0;
-    } else if (++reversalCount >= REVERSAL_THRESHOLD) {
-      runs.push(currentRun);
-      currentRun    = [visits[v]];
-      reversalCount = 0;
-    } else {
-      currentRun.push(visits[v]);
-    }
-  }
-  runs.push(currentRun);
-  return runs.filter(r => r.length > 0);
-}
+// ── Journey-to-trip matching ──────────────────────────────────────────────────
 
 /**
- * Greedily assign each run to the best unmatched trip. Scoring: stop-ID overlap
- * (primary, × 1000) minus temporal distance from run start to trip scheduled
- * start (secondary).
+ * Match the observed journey to each trip's stop sequence.
+ *
+ * For each journey entry, the "preferred" trip is the one whose scheduled time
+ * for that stop is closest to the ping time — exclusive temporal attribution
+ * with no hard threshold, purely relative. A trip may only claim a journey entry
+ * that prefers it. Claims advance a per-trip cursor enforcing that stop matches
+ * appear in the same chronological order as the journey (monotone forward scan).
+ *
+ * Trips with identical stop sequences are handled correctly: early pings are
+ * claimed by the trip whose schedule is temporally closest, leaving later pings
+ * exclusively available for the later trip.
  */
-function matchRunsToTrips(
-  runs:         StopVisit[][],
-  allStopInfos: StopInfo[][],
-): Map<number, number> {
-  const assigned = new Set<number>();
-  const result   = new Map<number, number>();
-
-  for (let r = 0; r < runs.length; r++) {
-    const runStopIds = new Set(runs[r].map(v => v.stopId));
-    const runStart   = runs[r][0].pingT;
-    let bestTripIdx  = -1;
-    let bestScore    = -Infinity;
-
-    for (let t = 0; t < allStopInfos.length; t++) {
-      if (assigned.has(t)) continue;
-      const overlap  = allStopInfos[t].filter(info => runStopIds.has(info.stopId)).length;
-      if (overlap === 0) continue;
-      const timeDiff = Math.abs(runStart - (allStopInfos[t][0]?.schedMin ?? 0));
-      const score    = overlap * 1000 - timeDiff;
-      if (score > bestScore) { bestScore = score; bestTripIdx = t; }
-    }
-
-    if (bestTripIdx >= 0) { result.set(r, bestTripIdx); assigned.add(bestTripIdx); }
-  }
-  return result;
-}
-
-/**
- * Build TripRecords for a partial run. Trims pings before the first stop match,
- * segments the visit sequence into directional runs, and matches each run to the
- * temporally closest trip with overlapping stops.
- */
-function buildPartialTripRecords(
+function matchJourneyToTrips(
+  journey:       JourneyStop[],
   sortedTripIds: string[],
   allStopInfos:  StopInfo[][],
-  pings:         PingWithTime[],
+  allPings:      PingWithTime[],
 ): TripRecord[] {
-  // Trim pings before first stop match
-  let firstMatchT = Infinity;
-  outer: for (const pw of pings) {
-    for (const infos of allStopInfos)
-      for (const info of infos)
-        if (haversineKm(info.lat, info.lon, pw.p.lat, pw.p.lon) < SEQ_STOP_KM) {
-          firstMatchT = pw.t; break outer;
-        }
-  }
-  const trimmed = firstMatchT === Infinity ? pings : pings.filter(pw => pw.t >= firstMatchT);
+  const stopSchedules = buildStopScheduleMap(allStopInfos);
 
-  const visits    = buildStopVisitSequence(trimmed, allStopInfos);
-  const runs      = segmentVisitsIntoRuns(visits, allStopInfos);
-  const runToTrip = matchRunsToTrips(runs, allStopInfos);
+  // For each journey entry, pre-compute which trip has the closest scheduled
+  // time for that stop. Ties broken by trip index (earlier trip wins).
+  const preferred: number[] = journey.map(visit => {
+    const schedules = stopSchedules.get(visit.stopId) ?? [];
+    let bestTripIdx = -1;
+    let bestDist    = Infinity;
+    for (const s of schedules) {
+      const d = Math.abs(visit.pingT - s.schedMin);
+      if (d < bestDist) { bestDist = d; bestTripIdx = s.tripIdx; }
+    }
+    return bestTripIdx;
+  });
+
+  const claimed = new Uint8Array(journey.length);
 
   return sortedTripIds.map((tid, tripIdx) => {
-    const runIdx = [...runToTrip.entries()].find(([, t]) => t === tripIdx)?.[0];
-    if (runIdx === undefined)
-      return { tid, stopMatches: allStopInfos[tripIdx].map((s, j) => emptyMatch(s, j)), pings: [] };
-
-    // Earlier visit wins for each stop (first time the vehicle reaches it in this run)
-    const visitMap = new Map<string, StopVisit>();
-    for (const v of runs[runIdx])
-      if (!visitMap.has(v.stopId)) visitMap.set(v.stopId, v);
+    // cursor ensures we only scan forward in the journey (monotone ordering)
+    let cursor = 0;
 
     const stopMatches: StopMatch[] = allStopInfos[tripIdx].map((info, j) => {
-      const v = visitMap.get(info.stopId);
-      if (!v) return emptyMatch(info, j);
-      return {
-        stopIndex: j, stopId: info.stopId, stopName: info.stopName,
-        schedMin: info.schedMin, cumDistKm: info.cumDist,
-        matchedPing: v.ping, matchedPingT: v.pingT,
-        devMin: v.pingT - info.schedMin, visited: true,
-      };
+      for (let k = cursor; k < journey.length; k++) {
+        if (journey[k].stopId !== info.stopId) continue;
+        if (claimed[k] || preferred[k] !== tripIdx) continue;
+        claimed[k] = 1;
+        cursor     = k + 1;
+        const v    = journey[k];
+        return {
+          stopIndex: j, stopId: info.stopId, stopName: info.stopName,
+          schedMin: info.schedMin, cumDistKm: info.cumDist,
+          matchedPing: v.ping, matchedPingT: v.pingT,
+          devMin: v.pingT - info.schedMin, visited: true,
+        };
+      }
+      return emptyMatch(info, j);
     });
 
     const visited = stopMatches.filter(m => m.visited);
-    const pingWindow = visited.length >= 2
-      ? getPingsInWindow(visited[0].matchedPingT!, visited.at(-1)!.matchedPingT!, pings)
+    const pings   = visited.length >= 2
+      ? getPingsInWindow(visited[0].matchedPingT!, visited.at(-1)!.matchedPingT!, allPings)
       : visited.length === 1 ? [visited[0].matchedPing!] : [];
-    return { tid, stopMatches, pings: pingWindow };
+    return { tid, stopMatches, pings };
   });
 }
 
@@ -406,16 +272,12 @@ function buildPartialTripRecords(
 /**
  * Match vehicle pings to a block's trips and return structured TripRecords.
  *
- * Phase 1 — Global: for every (trip, stop) pair, collect pings within SEQ_STOP_KM
- *   starting from BLOCK_PRE_SLACK_MIN before the block's first scheduled departure.
- * Phase 2 — Assess coverage:
- *   2.A All stops matched  → 3.A
- *   2.B/C Partial matches  → 3.B
- *   2.D No matches at all  → 3.C (error)
- * Phase 3A — Correct run: pick temporally-closest ping per (trip, stop).
- * Phase 3B — Partial run: trim pre-block pings, build a stop-visit sequence,
- *   segment into directional runs, match runs to trips by stop-overlap + time.
- * Phase 3C — Inaccurate: return empty records with error: 'no_match'.
+ * 1. Build the journey — the vehicle's observed stop-visit sequence across the
+ *    entire block, in chronological order.
+ * 2. If the journey is empty (no pings near any block stop), return error.
+ * 3. Match the journey to each trip via exclusive temporal attribution and
+ *    monotone forward scanning. Handles all cases uniformly: unique stops,
+ *    shared stops, repeated sequences, same-direction consecutive trips.
  */
 export function matchBlockPings(
   sortedTripIds:      string[],
@@ -428,14 +290,9 @@ export function matchBlockPings(
   const blockStartMin = allStopInfos[0]?.[0]?.schedMin ?? 0;
   const relevant      = sortedVehiclePings.filter(pw => pw.t >= blockStartMin - BLOCK_PRE_SLACK_MIN);
 
-  // Phase 1
-  const globalMatches = buildGlobalStopMatches(allStopInfos, relevant);
+  const journey = buildJourney(relevant, allStopInfos);
 
-  // Phase 2
-  const coverage = assessCoverage(globalMatches);
-
-  // Phase 3C
-  if (coverage === 'inaccurate') {
+  if (journey.length === 0) {
     return {
       tripRecords:  sortedTripIds.map((tid, i) => ({
         tid,
@@ -447,17 +304,7 @@ export function matchBlockPings(
     };
   }
 
-  // Phase 3A
-  if (coverage === 'correct') {
-    const tripRecords = buildCorrectTripRecords(sortedTripIds, allStopInfos, globalMatches, relevant);
-    return {
-      tripRecords,
-      skippedCount: tripRecords.filter(r => !r.stopMatches.some(m => m.visited)).length,
-    };
-  }
-
-  // Phase 3B
-  const tripRecords = buildPartialTripRecords(sortedTripIds, allStopInfos, relevant);
+  const tripRecords = matchJourneyToTrips(journey, sortedTripIds, allStopInfos, relevant);
   return {
     tripRecords,
     skippedCount: tripRecords.filter(r => !r.stopMatches.some(m => m.visited)).length,

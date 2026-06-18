@@ -4,23 +4,25 @@
   import type { ChartConfiguration } from 'chart.js';
   import type { GtfsData } from '../types';
   import type { VehiclePosition } from '../liveTypes';
+  import type { BlockPingData } from '../schedulePings';
   import { haversineKm, parseTimeMin } from '../popupUtils';
 
   let {
     blockTripIds = [],
     gtfsData,
-    livePositions = [],
-    selectedDate = '',
+    pingData = null,
   }: {
     blockTripIds: string[];
     gtfsData: GtfsData;
-    livePositions?: VehiclePosition[];
-    selectedDate?: string;
+    pingData?: BlockPingData | null;
   } = $props();
 
   let showTripSegments = $state(true);
   let canvas: HTMLCanvasElement;
   let chart: Chart | null = null;
+
+  const TRIP_PALETTE = ['#818cf8','#34d399','#fb923c','#f472b6','#38bdf8','#a78bfa','#4ade80','#facc15','#f87171','#2dd4bf'];
+  function tripColor(i: number): string { return TRIP_PALETTE[i % TRIP_PALETTE.length]; }
 
   const tz = $derived([...gtfsData.agencies.values()][0]?.agency_timezone ?? 'UTC');
 
@@ -45,45 +47,15 @@
     return d;
   }
 
-  // Scheduled cumulative distance over the whole block day
-  const scheduledPoints = $derived.by(() => {
-    const pts: { x: number; y: number }[] = [];
-    let cumDist = 0;
-    for (const { tid } of sortedTrips) {
-      const sts = gtfsData.stopTimesByTrip.get(tid) ?? [];
-      let tripCum = 0;
-      for (let i = 0; i < sts.length; i++) {
-        if (i > 0) {
-          const a = gtfsData.stops.get(sts[i - 1].stop_id);
-          const b = gtfsData.stops.get(sts[i].stop_id);
-          if (a && b) tripCum += haversineKm(a.stop_lat, a.stop_lon, b.stop_lat, b.stop_lon);
-        }
-        pts.push({ x: parseTimeMin(sts[i].departure_time || sts[i].arrival_time), y: cumDist + tripCum });
-      }
-      cumDist += tripDistKm(tid);
+  // Pings pre-assigned per trip from BlockPingData
+  const liveByTrip = $derived.by(() => {
+    const map = new Map<string, VehiclePosition[]>();
+    for (const record of pingData?.tripRecords ?? []) {
+      const sorted = [...record.pings].sort((a, b) => a.timestamp - b.timestamp);
+      if (sorted.length > 0) map.set(record.tid, sorted);
     }
-    return pts;
+    return map;
   });
-
-  // Trip boundary info for segment grid lines and tooltips
-  const tripBoundaries = $derived.by(() => {
-    let cumDist = 0;
-    return sortedTrips.map(({ tid, firstMin }) => {
-      const sts = gtfsData.stopTimesByTrip.get(tid) ?? [];
-      const lastMin = sts.at(-1) ? parseTimeMin(sts.at(-1)!.arrival_time || sts.at(-1)!.departure_time) : firstMin;
-      const dist = tripDistKm(tid);
-      const boundary = { tid, startMin: firstMin, endMin: lastMin, cumDistStart: cumDist, cumDistEnd: cumDist + dist };
-      cumDist += dist;
-      return boundary;
-    });
-  });
-
-  const blockSet = $derived(new Set(blockTripIds));
-
-  const sortedLive = $derived(
-    [...livePositions.filter(p => p.trip_id && blockSet.has(p.trip_id))]
-      .sort((a, b) => a.timestamp - b.timestamp)
-  );
 
   function epochToMin(epoch: number): number {
     const parts = new Intl.DateTimeFormat('en-US', {
@@ -100,165 +72,199 @@
     return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
   }
 
-  function localMidnightEpoch(date: string, timezone: string): number {
-    if (date.length !== 8) return 0;
-    const y = date.slice(0, 4), mo = date.slice(4, 6), d = date.slice(6, 8);
-    const noonUtcMs = Date.parse(`${y}-${mo}-${d}T12:00:00Z`);
-    const parts = new Intl.DateTimeFormat('en-US', {
-      timeZone: timezone, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
-    }).formatToParts(new Date(noonUtcMs));
-    const h = parseInt(parts.find(p => p.type === 'hour')?.value ?? '12');
-    const mi = parseInt(parts.find(p => p.type === 'minute')?.value ?? '0');
-    const s = parseInt(parts.find(p => p.type === 'second')?.value ?? '0');
-    return (noonUtcMs - (h * 3600 + mi * 60 + s) * 1000) / 1000;
-  }
-
-  const actualPoints = $derived.by(() => {
-    const positions = sortedLive;
-    if (positions.length === 0) return [];
-    let cum = 0;
-    return positions.map((p, i) => {
-      if (i > 0) cum += haversineKm(positions[i - 1].lat, positions[i - 1].lon, p.lat, p.lon);
-      return { x: epochToMin(p.timestamp), y: cum };
-    });
-  });
-
-  const adjustedPoints = $derived.by(() => {
-    const positions = sortedLive;
-    if (positions.length === 0) return [];
-    const midnight = localMidnightEpoch(selectedDate, tz);
-
-    let cumSched = 0;
-    const tripStarts = sortedTrips.map(({ tid }) => {
+  // Scheduled points per trip (cumulative distance continues across trips)
+  const scheduledPointsByTrip = $derived.by(() => {
+    const result = new Map<string, { x: number; y: number }[]>();
+    let cumDist = 0;
+    for (const { tid } of sortedTrips) {
       const sts = gtfsData.stopTimesByTrip.get(tid) ?? [];
-      const firstMin = sts[0] ? parseTimeMin(sts[0].departure_time || sts[0].arrival_time) : 0;
-      const firstStopId = sts[0]?.stop_id ?? '';
-      const start = { firstStopId, schedEpoch: midnight + firstMin * 60, schedCumDist: cumSched };
-      cumSched += tripDistKm(tid);
-      return start;
-    });
-
-    let cumActual = 0;
-    let offset = 0;
-    const pending = [...tripStarts];
-    const result: { x: number; y: number }[] = [];
-
-    for (let i = 0; i < positions.length; i++) {
-      const pos = positions[i];
-      if (i > 0) cumActual += haversineKm(positions[i - 1].lat, positions[i - 1].lon, pos.lat, pos.lon);
-
-      while (pending.length > 0) {
-        const next = pending[0];
-        const timeDiff = pos.timestamp - next.schedEpoch;
-        const firstStop = gtfsData.stops.get(next.firstStopId);
-        const spatialKm = firstStop
-          ? haversineKm(firstStop.stop_lat, firstStop.stop_lon, pos.lat, pos.lon)
-          : Infinity;
-        if (timeDiff >= -3 * 60 && timeDiff <= 8 * 60 && spatialKm < 0.3) {
-          offset = next.schedCumDist - cumActual;
-          pending.shift();
-          break;
-        } else if (timeDiff > 15 * 60) {
-          pending.shift();
-        } else {
-          break;
+      const pts: { x: number; y: number }[] = [];
+      let tripCum = 0;
+      for (let i = 0; i < sts.length; i++) {
+        if (i > 0) {
+          const a = gtfsData.stops.get(sts[i - 1].stop_id);
+          const b = gtfsData.stops.get(sts[i].stop_id);
+          if (a && b) tripCum += haversineKm(a.stop_lat, a.stop_lon, b.stop_lat, b.stop_lon);
         }
+        pts.push({ x: parseTimeMin(sts[i].departure_time || sts[i].arrival_time), y: cumDist + tripCum });
       }
-      result.push({ x: epochToMin(pos.timestamp), y: cumActual + offset });
+      result.set(tid, pts);
+      cumDist += tripDistKm(tid);
     }
     return result;
   });
 
+  // GPS-measured distance per trip (stop-windowed)
+  const blockGpsDists = $derived.by(() => {
+    const result = new Map<string, number>();
+    for (const { tid } of sortedTrips) {
+      const sts    = gtfsData.stopTimesByTrip.get(tid) ?? [];
+      const tPings = liveByTrip.get(tid) ?? [];
+      let tripTotal = 0;
+      for (let i = 0; i < sts.length - 1; i++) {
+        const t0 = parseTimeMin(sts[i].departure_time || sts[i].arrival_time);
+        const t1 = parseTimeMin(sts[i + 1].arrival_time || sts[i + 1].departure_time);
+        const segPings = tPings.filter(p => { const pm = epochToMin(p.timestamp); return pm >= t0 && pm <= t1; });
+        if (segPings.length >= 2) {
+          for (let j = 1; j < segPings.length; j++)
+            tripTotal += haversineKm(segPings[j-1].lat, segPings[j-1].lon, segPings[j].lat, segPings[j].lon);
+        } else {
+          const stopA = gtfsData.stops.get(sts[i].stop_id);
+          const stopB = gtfsData.stops.get(sts[i+1].stop_id);
+          if (stopA && stopB) tripTotal += haversineKm(stopA.stop_lat, stopA.stop_lon, stopB.stop_lat, stopB.stop_lon);
+        }
+      }
+      result.set(tid, tripTotal);
+    }
+    return result;
+  });
+
+  // Actual GPS points per trip (cumulative distance continues across trips)
+  const actualPointsByTrip = $derived.by(() => {
+    const result = new Map<string, { x: number; y: number }[]>();
+    let cumDist = 0;
+    for (const { tid } of sortedTrips) {
+      const sts    = gtfsData.stopTimesByTrip.get(tid) ?? [];
+      const tPings = liveByTrip.get(tid) ?? [];
+      const pts: { x: number; y: number }[] = [];
+      let tripCum = 0;
+
+      for (let i = 0; i < sts.length - 1; i++) {
+        const t0 = parseTimeMin(sts[i].departure_time || sts[i].arrival_time);
+        const t1 = parseTimeMin(sts[i + 1].arrival_time || sts[i + 1].departure_time);
+        const segPings = tPings.filter(p => { const pm = epochToMin(p.timestamp); return pm >= t0 && pm <= t1; });
+
+        if (segPings.length >= 2) {
+          let segCum = 0;
+          for (let j = 0; j < segPings.length; j++) {
+            if (j > 0) segCum += haversineKm(segPings[j-1].lat, segPings[j-1].lon, segPings[j].lat, segPings[j].lon);
+            pts.push({ x: epochToMin(segPings[j].timestamp), y: cumDist + tripCum + segCum });
+          }
+          let segGpsDist = 0;
+          for (let j = 1; j < segPings.length; j++)
+            segGpsDist += haversineKm(segPings[j-1].lat, segPings[j-1].lon, segPings[j].lat, segPings[j].lon);
+          tripCum += segGpsDist;
+        } else {
+          const stopA = gtfsData.stops.get(sts[i].stop_id);
+          const stopB = gtfsData.stops.get(sts[i+1].stop_id);
+          const segDist = stopA && stopB ? haversineKm(stopA.stop_lat, stopA.stop_lon, stopB.stop_lat, stopB.stop_lon) : 0;
+          pts.push({ x: t0, y: cumDist + tripCum });
+          tripCum += segDist;
+        }
+      }
+      if (sts.length > 0) {
+        const lastSt = sts[sts.length - 1];
+        pts.push({ x: parseTimeMin(lastSt.arrival_time || lastSt.departure_time), y: cumDist + tripCum });
+      }
+
+      result.set(tid, pts);
+      cumDist += (blockGpsDists.get(tid) ?? tripDistKm(tid));
+    }
+    return result;
+  });
+
+  // Combined arrays for interpolation + axis range
+  const allScheduledPts = $derived(
+    sortedTrips.flatMap(({ tid }) => scheduledPointsByTrip.get(tid) ?? [])
+  );
+  const allActualPts = $derived(
+    sortedTrips.flatMap(({ tid }) => actualPointsByTrip.get(tid) ?? [])
+  );
+
+  // Trip boundary info for segment grid lines
+  const tripBoundaries = $derived.by(() => {
+    let cumDist = 0;
+    return sortedTrips.map(({ tid, firstMin }) => {
+      const sts     = gtfsData.stopTimesByTrip.get(tid) ?? [];
+      const lastMin = sts.at(-1) ? parseTimeMin(sts.at(-1)!.arrival_time || sts.at(-1)!.departure_time) : firstMin;
+      const dist    = blockGpsDists.get(tid) ?? tripDistKm(tid);
+      const b       = { tid, startMin: firstMin, endMin: lastMin, cumDistStart: cumDist, cumDistEnd: cumDist + dist };
+      cumDist += dist;
+      return b;
+    });
+  });
+
   const timeRange = $derived.by(() => {
-    const all = [...scheduledPoints, ...actualPoints].map(p => p.x);
+    const all = [...allScheduledPts, ...allActualPts].map(p => p.x);
     if (all.length === 0) return { lo: 0, hi: 24 * 60 };
     return { lo: Math.max(0, Math.min(...all) - 5), hi: Math.min(30 * 60, Math.max(...all) + 5) };
   });
 
   const maxY = $derived(Math.max(
     0.001,
-    ...scheduledPoints.map(p => p.y),
-    ...actualPoints.map(p => p.y),
-    ...adjustedPoints.map(p => p.y),
+    ...allScheduledPts.map(p => p.y),
+    ...allActualPts.map(p => p.y),
   ) * 1.05);
 
-  // Interpolate the scheduled cumulative distance at a given time (minutes)
   function schedDistAtTime(tMin: number): number | null {
-    const pts = scheduledPoints;
+    const pts = allScheduledPts;
     if (pts.length === 0) return null;
     if (tMin <= pts[0].x) return pts[0].y;
     if (tMin >= pts.at(-1)!.x) return pts.at(-1)!.y;
     for (let i = 1; i < pts.length; i++) {
       if (tMin <= pts[i].x) {
-        const frac = (tMin - pts[i - 1].x) / (pts[i].x - pts[i - 1].x);
-        return pts[i - 1].y + frac * (pts[i].y - pts[i - 1].y);
+        const frac = (tMin - pts[i-1].x) / (pts[i].x - pts[i-1].x);
+        return pts[i-1].y + frac * (pts[i].y - pts[i-1].y);
       }
     }
     return null;
   }
 
-  // Find the scheduled time (minutes) at which a given cumulative distance is reached
   function schedTimeForDist(dist: number): number | null {
-    const pts = scheduledPoints;
+    const pts = allScheduledPts;
     if (pts.length === 0) return null;
     for (let i = 1; i < pts.length; i++) {
-      if (pts[i].y >= dist && pts[i - 1].y <= dist) {
-        if (pts[i].y === pts[i - 1].y) return pts[i - 1].x;
-        const frac = (dist - pts[i - 1].y) / (pts[i].y - pts[i - 1].y);
-        return pts[i - 1].x + frac * (pts[i].x - pts[i - 1].x);
+      if (pts[i].y >= dist && pts[i-1].y <= dist) {
+        if (pts[i].y === pts[i-1].y) return pts[i-1].x;
+        const frac = (dist - pts[i-1].y) / (pts[i].y - pts[i-1].y);
+        return pts[i-1].x + frac * (pts[i].x - pts[i-1].x);
       }
     }
     return null;
   }
 
-  // Which trip segment does a cumulative distance belong to?
   function tripForDist(cumKm: number): { tid: string; localKm: number; totalKm: number } | null {
     for (const b of tripBoundaries) {
-      if (cumKm >= b.cumDistStart && cumKm <= b.cumDistEnd + 0.001) {
+      if (cumKm >= b.cumDistStart && cumKm <= b.cumDistEnd + 0.001)
         return { tid: b.tid, localKm: cumKm - b.cumDistStart, totalKm: b.cumDistEnd - b.cumDistStart };
-      }
     }
     return null;
   }
 
-  // Mutable config for the custom plugin (avoids stale closures)
   const pluginCfg = { showSegments: true, boundaries: [] as typeof tripBoundaries };
 
   function buildConfig(): ChartConfiguration {
+    // Datasets: [trip0_sched, trip0_actual, trip1_sched, trip1_actual, ...]
+    const datasets = sortedTrips.flatMap(({ tid }, i) => {
+      const color     = tripColor(i);
+      const schedPts  = scheduledPointsByTrip.get(tid) ?? [];
+      const actualPts = actualPointsByTrip.get(tid) ?? [];
+      return [
+        {
+          label: `${tid} scheduled`,
+          data: schedPts,
+          borderColor: color + 'aa',
+          backgroundColor: 'transparent',
+          borderWidth: 1.5,
+          borderDash: [5, 3],
+          pointRadius: 0,
+          tension: 0,
+        },
+        {
+          label: `${tid} actual`,
+          data: actualPts,
+          borderColor: color,
+          backgroundColor: 'transparent',
+          borderWidth: 2,
+          pointRadius: 0,
+          tension: 0,
+        },
+      ];
+    });
+
     return {
       type: 'line',
-      data: {
-        datasets: [
-          {
-            label: 'Scheduled',
-            data: scheduledPoints,
-            borderColor: '#6366f1',
-            backgroundColor: 'transparent',
-            borderWidth: 2,
-            pointRadius: 0,
-            tension: 0,
-          },
-          {
-            label: 'Actual',
-            data: actualPoints,
-            borderColor: '#34d399',
-            backgroundColor: 'transparent',
-            borderWidth: 1.5,
-            pointRadius: 0,
-            tension: 0,
-          },
-          {
-            label: 'Adjusted',
-            data: adjustedPoints,
-            borderColor: '#f59e0b',
-            backgroundColor: 'transparent',
-            borderWidth: 1.5,
-            borderDash: [4, 3],
-            pointRadius: 0,
-            tension: 0,
-          },
-        ],
-      },
+      data: { datasets },
       options: {
         responsive: true,
         maintainAspectRatio: false,
@@ -296,19 +302,7 @@
           },
         },
         plugins: {
-          legend: {
-            display: true,
-            position: 'top' as const,
-            align: 'end' as const,
-            labels: {
-              color: '#94a3b8',
-              boxWidth: 20,
-              boxHeight: 2,
-              font: { size: 11 },
-              padding: 16,
-              usePointStyle: false,
-            },
-          },
+          legend: { display: false },
           tooltip: {
             mode: 'index' as const,
             intersect: false,
@@ -323,45 +317,28 @@
                 return t != null ? `Time: ${fmtMin(t)}` : '';
               },
               label(item) {
-                const tMin = item.parsed.x;
+                const tMin  = item.parsed.x;
                 const dist  = item.parsed.y;
-                const label = item.dataset.label ?? '';
+                const lbl   = item.dataset.label ?? '';
+                const isAct = lbl.endsWith(' actual');
 
-                if (label === 'Scheduled') {
-                  const seg = tripForDist(dist);
-                  const segStr = seg ? `  (trip ${seg.tid}: ${seg.localKm.toFixed(2)} / ${seg.totalKm.toFixed(2)} km)` : '';
-                  return `Scheduled: ${dist.toFixed(2)} km${segStr}`;
+                if (!isAct) {
+                  const seg    = tripForDist(dist);
+                  const segStr = seg ? `  (${seg.localKm.toFixed(2)} / ${seg.totalKm.toFixed(2)} km)` : '';
+                  return `Sched: ${dist.toFixed(2)} km${segStr}`;
                 }
 
-                if (label === 'Actual' || label === 'Adjusted') {
-                  const schedDist = schedDistAtTime(tMin);
-                  const distDev   = schedDist != null ? dist - schedDist : null;
+                const schedDist = schedDistAtTime(tMin);
+                const distDev   = schedDist != null ? dist - schedDist : null;
+                const schedTime = schedTimeForDist(dist);
+                const timeDev   = schedTime != null ? tMin - schedTime : null;
+                const seg       = tripForDist(dist);
 
-                  // Time deviation: when was this distance scheduled to be reached?
-                  const schedTime = schedTimeForDist(dist);
-                  const timeDev   = schedTime != null ? tMin - schedTime : null;
-
-                  const seg = tripForDist(dist);
-                  const localKm = seg ? seg.localKm : null;
-                  const totalKm = seg ? seg.totalKm : null;
-
-                  const lines: string[] = [];
-                  lines.push(`${label}: ${dist.toFixed(2)} km`);
-                  if (distDev != null) {
-                    const sign = distDev >= 0 ? '+' : '';
-                    lines.push(`  vs schedule: ${sign}${distDev.toFixed(2)} km`);
-                  }
-                  if (timeDev != null) {
-                    const sign = timeDev >= 0 ? '+' : '';
-                    lines.push(`  time dev: ${sign}${Math.round(timeDev)} min`);
-                  }
-                  if (localKm != null && totalKm != null && seg) {
-                    lines.push(`  on trip ${seg.tid}: ${localKm.toFixed(2)} / ${totalKm.toFixed(2)} km`);
-                  }
-                  return lines;
-                }
-
-                return `${label}: ${dist.toFixed(2)} km`;
+                const lines: string[] = [`Actual: ${dist.toFixed(2)} km`];
+                if (distDev != null) lines.push(`  vs schedule: ${distDev >= 0 ? '+' : ''}${distDev.toFixed(2)} km`);
+                if (timeDev != null) lines.push(`  time dev: ${timeDev >= 0 ? '+' : ''}${Math.round(timeDev)} min`);
+                if (seg) lines.push(`  on trip ${seg.tid}: ${seg.localKm.toFixed(2)} / ${seg.totalKm.toFixed(2)} km`);
+                return lines;
               },
             },
           },
@@ -379,14 +356,12 @@
           id: 'tripSegments',
           beforeDraw(c) {
             if (!pluginCfg.showSegments || pluginCfg.boundaries.length === 0) return;
-            const ctx  = c.ctx;
-            const xSc  = c.scales['x'];
-            const ySc  = c.scales['y'];
+            const ctx = c.ctx;
+            const xSc = c.scales['x'];
+            const ySc = c.scales['y'];
             if (!xSc || !ySc) return;
-            const top    = ySc.top;
-            const bottom = ySc.bottom;
+            const top = ySc.top, bottom = ySc.bottom;
 
-            // Alternating shaded bands
             pluginCfg.boundaries.forEach((b, i) => {
               const x1 = xSc.getPixelForValue(b.startMin);
               const x2 = xSc.getPixelForValue(b.endMin);
@@ -398,28 +373,22 @@
               }
             });
 
-            // Vertical lines at trip boundaries (skip first)
             ctx.save();
             ctx.strokeStyle = '#334155';
             ctx.lineWidth = 1;
             ctx.setLineDash([3, 3]);
             for (let i = 1; i < pluginCfg.boundaries.length; i++) {
               const x = xSc.getPixelForValue(pluginCfg.boundaries[i].startMin);
-              ctx.beginPath();
-              ctx.moveTo(x, top);
-              ctx.lineTo(x, bottom);
-              ctx.stroke();
+              ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, bottom); ctx.stroke();
             }
-            // Labels at top of each band
             ctx.setLineDash([]);
             ctx.font = '10px system-ui';
             ctx.fillStyle = '#475569';
             ctx.textAlign = 'left';
             for (const b of pluginCfg.boundaries) {
               const x = xSc.getPixelForValue(b.startMin) + 3;
-              if (x > xSc.left && x < xSc.right - 20) {
+              if (x > xSc.left && x < xSc.right - 20)
                 ctx.fillText(b.tid.length > 10 ? b.tid.slice(0, 9) + '…' : b.tid, x, top + 11);
-              }
             }
             ctx.restore();
           },
@@ -440,25 +409,26 @@
     if (!chart) return;
     pluginCfg.boundaries   = tripBoundaries;
     pluginCfg.showSegments = showTripSegments;
-    chart.data.datasets[1].data = actualPoints   as never;
-    chart.data.datasets[2].data = adjustedPoints as never;
+    // Update actual dataset for each trip (at index i*2 + 1)
+    for (let i = 0; i < sortedTrips.length; i++) {
+      const ds = chart.data.datasets[i * 2 + 1];
+      if (ds) ds.data = (actualPointsByTrip.get(sortedTrips[i].tid) ?? []) as never;
+    }
     (chart.options.scales!.x as { min: number; max: number }).min = timeRange.lo;
     (chart.options.scales!.x as { min: number; max: number }).max = timeRange.hi;
     (chart.options.scales!.y as { max: number }).max = maxY;
     chart.update('none');
   }
 
-  // Recreate when scheduled structure changes
   $effect(() => {
-    const _trips = sortedTrips; const _sched = scheduledPoints; const _t = timeRange; const _y = maxY;
+    const _trips = sortedTrips; const _sched = allScheduledPts; const _t = timeRange; const _y = maxY;
     const _seg = showTripSegments; const _b = tripBoundaries;
     createChart();
     untrack(() => refreshData());
   });
 
-  // Lightweight update for live positions
   $effect(() => {
-    const _live = livePositions;
+    const _live = pingData;
     untrack(() => refreshData());
   });
 
@@ -476,8 +446,22 @@
 <div class="space-y-3">
   <div class="flex flex-wrap items-center gap-4">
     <p class="text-xs text-slate-500 flex-1">
-      Scheduled vs. actual GPS distance. Adjusted line resets to schedule at each detected trip start.
+      Scheduled (dashed) vs. actual GPS distance per stop segment.
     </p>
+
+    <!-- Per-trip colour legend -->
+    <div class="flex flex-wrap items-center gap-3 text-[10px]">
+      {#each sortedTrips as { tid }, i}
+        {@const c = tripColor(i)}
+        <span class="flex items-center gap-2" style:color={c}>
+          <span class="inline-flex items-center gap-0.5">
+            <span class="inline-block h-px w-4 opacity-60" style:background={c} style:border-top="2px dashed {c}"></span>
+          </span>
+          <span class="inline-block h-px w-3" style:background={c}></span>
+          {tid}
+        </span>
+      {/each}
+    </div>
 
     <label class="flex cursor-pointer items-center gap-2">
       <input type="checkbox" class="h-3 w-3 accent-indigo-500" bind:checked={showTripSegments} />
@@ -502,7 +486,7 @@
     <div class="h-[350px]">
       <canvas bind:this={canvas}></canvas>
     </div>
-    {#if actualPoints.length === 0}
+    {#if allActualPts.length === 0}
       <p class="text-center text-[11px] text-slate-600">No live position data received yet for this block.</p>
     {/if}
   {/if}

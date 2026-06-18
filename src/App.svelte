@@ -8,11 +8,15 @@
   import { buildGtfsFromApi } from './lib/gtfsFromApi';
   import { buildLiveStopTimes, applyInterpolation } from './lib/liveStopTimes';
   import { parseTimeMin } from './lib/popupUtils';
+  import { getCachedBundle, setCachedBundle, getCachedPositions, setCachedPositions } from './lib/idb';
   import type { GtfsData } from './lib/types';
   import type { LiveData, VehiclePosition } from './lib/liveTypes';
+  import type { BlockPingData } from './lib/schedulePings';
+  import { pingCacheGet } from './lib/pingDataCache';
   import MapView from './lib/Map.svelte';
   import Sidebar from './lib/Sidebar.svelte';
   import Dashboard from './lib/Dashboard.svelte';
+  import DatePicker from './lib/DatePicker.svelte';
   import Popup from './lib/Popup.svelte';
   import type { CardEntry } from './lib/popupTypes';
 
@@ -173,20 +177,48 @@
 
   // ── Load date ─────────────────────────────────────────────────────────────────
 
+  type GtfsBundle = Awaited<ReturnType<typeof fetchGtfsBundle>>;
+
   async function loadDate(allDates: string[], idx: number, returnScreen: AppScreen = 'map') {
     screen = 'loading';
     loadError = null;
+    wsError = null;
     dates = allDates;
     dateIndex = idx;
     const date = allDates[idx];
+    const isLatest = date === allDates[allDates.length - 1];
+
+    // Close any existing stream before switching dates
+    ws?.close(); ws = null;
 
     try {
-      const bundle = await fetchGtfsBundle(date);
+      // Bundle: IDB first, then API
+      let bundle: GtfsBundle;
+      const cachedBundle = await getCachedBundle<GtfsBundle>(date);
+      if (cachedBundle) {
+        bundle = cachedBundle;
+      } else {
+        bundle = await fetchGtfsBundle(date);
+        setCachedBundle(date, bundle); // fire-and-forget
+      }
+
       gtfsData = buildGtfsFromApi(bundle.agency, bundle.routes, bundle.stops, bundle.trips, bundle.stopTimes);
       vehicleAssignments = bundle.vehicleAssignments;
 
-      // Seed live data with current positions snapshot
-      const initialPositions = await fetchPositions(date).catch(() => [] as ApiPosition[]);
+      // Positions: always fresh for latest; IDB for historical dates
+      let initialPositions: ApiPosition[];
+      if (isLatest) {
+        initialPositions = await fetchPositions(date).catch(() => [] as ApiPosition[]);
+      } else {
+        const cachedPos = await getCachedPositions<ApiPosition>(date);
+        if (cachedPos) {
+          initialPositions = cachedPos;
+        } else {
+          initialPositions = await fetchPositions(date).catch(() => [] as ApiPosition[]);
+          if (initialPositions.length > 0) setCachedPositions(date, initialPositions); // fire-and-forget
+        }
+      }
+
       const initVehicleToTrips = new Map<string, string[]>();
       for (const a of bundle.vehicleAssignments) {
         const list = initVehicleToTrips.get(a.vehicle_id);
@@ -206,7 +238,9 @@
       }
       liveData = initialPositions.length > 0 ? buildLiveData() : null;
 
-      setupLiveStream(date, bundle.vehicleAssignments, gtfsData);
+      // Live WebSocket only for the latest (current) date
+      if (isLatest) setupLiveStream(date, bundle.vehicleAssignments, gtfsData);
+
       screen = returnScreen;
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to load data';
@@ -218,6 +252,39 @@
         screen = returnScreen;
       }
     }
+  }
+
+  // Silently prefetch + cache all dates in the background (one at a time, 800ms apart)
+  let _bgRunning = false;
+  async function backgroundPrefetch(allDates: string[]) {
+    if (_bgRunning) return;
+    _bgRunning = true;
+    const latestDate = allDates[allDates.length - 1];
+    for (const date of allDates) {
+      await new Promise(r => setTimeout(r, 800));
+      try {
+        const hasBundleCache = await getCachedBundle<unknown>(date);
+        if (!hasBundleCache) {
+          const bundle = await fetchGtfsBundle(date);
+          await setCachedBundle(date, bundle);
+          // Also cache positions for historical dates
+          if (date !== latestDate) {
+            const pos = await fetchPositions(date).catch(() => [] as ApiPosition[]);
+            if (pos.length > 0) await setCachedPositions(date, pos);
+          }
+        } else if (date !== latestDate) {
+          // Bundle cached but positions might not be
+          const hasPosCache = await getCachedPositions<unknown>(date);
+          if (!hasPosCache) {
+            const pos = await fetchPositions(date).catch(() => [] as ApiPosition[]);
+            if (pos.length > 0) await setCachedPositions(date, pos);
+          }
+        }
+      } catch {
+        // Silently skip (AUTH_EXPIRED, network error, etc.)
+      }
+    }
+    _bgRunning = false;
   }
 
   // ── Password submit ───────────────────────────────────────────────────────────
@@ -232,6 +299,7 @@
       const fetchedDates = await fetchDates();
       if (fetchedDates.length === 0) throw new Error('No data available on the server');
       await loadDate(fetchedDates, fetchedDates.length - 1);
+      backgroundPrefetch(fetchedDates);
     } catch (err) {
       passwordError = err instanceof Error ? err.message : 'Authentication failed';
       screen = 'password';
@@ -248,6 +316,7 @@
       const fetchedDates = await fetchDates();
       if (fetchedDates.length === 0) { screen = 'password'; return; }
       await loadDate(fetchedDates, fetchedDates.length - 1);
+      backgroundPrefetch(fetchedDates);
     } catch {
       clearToken();
       screen = 'password';
@@ -277,6 +346,54 @@
   let showStops           = $state(true);
   let showHeatmap         = $state(false);
   let interpolateSkipped  = $state(false);
+
+  // ── Block ping data (from persistent cache) ──────────────────────────────────
+
+  const TRIP_PALETTE = ['#818cf8','#34d399','#fb923c','#f472b6','#38bdf8','#a78bfa','#4ade80','#facc15','#f87171','#2dd4bf'];
+
+  const blockIds = $derived.by(() => {
+    const ids = [...new Set(vehicleAssignments.map(a => a.block_id).filter(Boolean))];
+    ids.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+    return ids;
+  });
+
+  let blockPingDataMap = $state(new Map<string, BlockPingData>());
+
+  // Re-read cache whenever we enter map view (catches new Dashboard computations)
+  $effect(() => {
+    if (screen !== 'map') return;
+    const bids = blockIds;
+    const date = selectedDate;
+    const result = new Map<string, BlockPingData>();
+    for (const bid of bids) {
+      const cached = pingCacheGet(bid, date);
+      if (cached) result.set(bid, cached);
+    }
+    blockPingDataMap = result;
+  });
+
+  let visibleTripIds = $state(new Set<string>());
+
+  function toggleTripIds(tids: string[], on: boolean) {
+    const next = new Set(visibleTripIds);
+    for (const tid of tids) {
+      if (on) next.add(tid);
+      else next.delete(tid);
+    }
+    visibleTripIds = next;
+  }
+
+  const tripPingLayers = $derived.by(() => {
+    const layers: Array<{ tid: string; color: string; pings: VehiclePosition[] }> = [];
+    for (const [, pingData] of blockPingDataMap) {
+      pingData.tripRecords.forEach((record, idx) => {
+        if (visibleTripIds.has(record.tid) && record.pings.length > 0) {
+          layers.push({ tid: record.tid, color: TRIP_PALETTE[idx % TRIP_PALETTE.length], pings: record.pings });
+        }
+      });
+    }
+    return layers;
+  });
 
   // ── Checked state (shape group keys) ─────────────────────────────────────────
 
@@ -452,11 +569,14 @@
       {liveData}
       {liveProcessed}
       {checkedKeys}
+      {blockPingDataMap}
+      {visibleTripIds}
       bind:showShapes
       bind:showStops
       bind:showHeatmap
       bind:interpolateSkipped
       onToggleKeys={toggleKeys}
+      onToggleTripIds={toggleTripIds}
       onShowDashboard={() => (screen = 'dashboard')}
     />
 
@@ -470,6 +590,9 @@
           {showShapes}
           {showStops}
           {showHeatmap}
+          vehiclePositions={liveData?.vehiclePositions ?? []}
+          {tripPingLayers}
+          isLatestDate={selectedDate === dates.at(-1)}
           onStopClick={handleStopClick}
           onShapeClick={handleShapeClick}
         />
@@ -494,10 +617,10 @@
 
       <!-- Date switcher bar -->
       {#if dates.length > 0}
-        <div class="flex items-center justify-center gap-3 border-t border-slate-800 bg-slate-900/90 backdrop-blur-sm px-4 py-2 shrink-0">
+        <div class="flex items-center justify-center gap-2 border-t border-slate-800 bg-slate-900/90 backdrop-blur-sm px-4 py-2 shrink-0">
           <button
             class="flex h-7 w-7 items-center justify-center rounded-md text-slate-400 hover:bg-slate-700 hover:text-slate-200 transition-colors disabled:opacity-30"
-            onclick={() => loadDate(dates, dateIndex - 1)}
+            onclick={() => changeDate(dates[dateIndex - 1])}
             disabled={dateIndex <= 0}
             aria-label="Previous date"
           >
@@ -506,22 +629,11 @@
             </svg>
           </button>
 
-          <div class="flex items-center gap-2">
-            <svg class="h-3.5 w-3.5 text-slate-500" fill="none" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.5">
-              <rect x="2" y="3" width="12" height="11" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
-              <path stroke-linecap="round" d="M5 1v3M11 1v3M2 7h12" stroke="currentColor" stroke-width="1.5"/>
-            </svg>
-            <span class="text-sm font-medium text-slate-200 min-w-[130px] text-center">
-              {selectedDate ? formatDate(selectedDate) : '—'}
-            </span>
-            <span class="text-[10px] text-slate-500">
-              {dateIndex + 1} / {dates.length}
-            </span>
-          </div>
+          <DatePicker {dates} {selectedDate} onSelect={changeDate} direction="up" />
 
           <button
             class="flex h-7 w-7 items-center justify-center rounded-md text-slate-400 hover:bg-slate-700 hover:text-slate-200 transition-colors disabled:opacity-30"
-            onclick={() => loadDate(dates, dateIndex + 1)}
+            onclick={() => changeDate(dates[dateIndex + 1])}
             disabled={dateIndex >= dates.length - 1}
             aria-label="Next date"
           >
@@ -529,6 +641,8 @@
               <path stroke-linecap="round" stroke-linejoin="round" d="M6 3l5 5-5 5"/>
             </svg>
           </button>
+
+          <span class="text-[10px] text-slate-600 select-none">{dateIndex + 1}/{dates.length}</span>
         </div>
       {/if}
     </div>

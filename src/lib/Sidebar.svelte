@@ -2,33 +2,43 @@
   import type { GtfsData, RouteTreeNode, AgencyTreeNode } from './types';
   import type { LiveData } from './liveTypes';
   import type { LiveProcessed } from './liveStopTimes';
+  import type { BlockPingData } from './schedulePings';
+
+  const TRIP_PALETTE = ['#818cf8','#34d399','#fb923c','#f472b6','#38bdf8','#a78bfa','#4ade80','#facc15','#f87171','#2dd4bf'];
 
   let {
     gtfsData,
     liveData = null,
     liveProcessed = null,
     checkedKeys,
+    blockPingDataMap = new Map<string, BlockPingData>(),
+    visibleTripIds   = new Set<string>(),
     showShapes = $bindable(true),
     showStops  = $bindable(true),
     showHeatmap = $bindable(false),
     interpolateSkipped = $bindable(false),
     onToggleKeys,
+    onToggleTripIds,
     onShowDashboard,
   }: {
     gtfsData: GtfsData | null;
     liveData?: LiveData | null;
     liveProcessed?: LiveProcessed | null;
     checkedKeys: Set<string>;
+    blockPingDataMap?: Map<string, BlockPingData>;
+    visibleTripIds?: Set<string>;
     showShapes?: boolean;
     showStops?: boolean;
     showHeatmap?: boolean;
     interpolateSkipped?: boolean;
     onToggleKeys: (keys: string[], on: boolean) => void;
+    onToggleTripIds?: (tids: string[], on: boolean) => void;
     onShowDashboard: () => void;
   } = $props();
 
   let expandedAgencies = $state(new Set<string>());
   let expandedRoutes   = $state(new Set<string>());
+  let expandedBlocks   = $state(new Set<string>());
 
   $effect(() => {
     if (gtfsData) {
@@ -138,6 +148,59 @@
       </label>
     {/each}
   </div>
+
+  <!-- Block pings -->
+  {#if blockPingDataMap.size > 0}
+    <div class="border-b border-slate-800 px-3 py-3">
+      <p class="mb-2 text-[10px] font-semibold uppercase tracking-widest text-slate-500">Block pings</p>
+      <div class="max-h-48 overflow-y-auto space-y-0.5">
+        {#each [...blockPingDataMap.entries()] as [blockId, pingData] (blockId)}
+          {@const blockExpanded = expandedBlocks.has(blockId)}
+          {@const allTids = pingData.tripRecords.map(r => r.tid)}
+          {@const checkedCount = allTids.filter(tid => visibleTripIds.has(tid)).length}
+          {@const blockState = checkedCount === 0 ? 'none' : checkedCount === allTids.length ? 'all' : 'some'}
+
+          <div>
+            <div class="flex items-center gap-1 rounded px-1 py-0.5 hover:bg-slate-800">
+              <button
+                class="flex h-4 w-4 shrink-0 items-center justify-center text-slate-500 hover:text-slate-300"
+                onclick={() => { expandedBlocks = toggleExpanded(expandedBlocks, blockId); }}
+              >
+                <svg class="h-3 w-3 transition-transform {blockExpanded ? 'rotate-90' : ''}" viewBox="0 0 12 12" fill="none">
+                  <path d="M4 2l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </button>
+              <input
+                type="checkbox"
+                class="h-3.5 w-3.5 shrink-0 accent-indigo-500"
+                use:tristate={blockState}
+                onchange={(e) => onToggleTripIds?.(allTids, e.currentTarget.checked)}
+              />
+              <span class="truncate text-xs font-medium text-slate-300">{blockId}</span>
+              <span class="ml-auto shrink-0 text-[10px] text-slate-600">{pingData.tripRecords.length}</span>
+            </div>
+
+            {#if blockExpanded}
+              {#each pingData.tripRecords as record, idx (record.tid)}
+                {@const color = TRIP_PALETTE[idx % TRIP_PALETTE.length]}
+                <label class="ml-5 flex cursor-pointer items-center gap-1.5 rounded px-2 py-0.5 hover:bg-slate-800">
+                  <input
+                    type="checkbox"
+                    class="h-3.5 w-3.5 shrink-0 accent-indigo-500"
+                    checked={visibleTripIds.has(record.tid)}
+                    onchange={(e) => onToggleTripIds?.([record.tid], e.currentTarget.checked)}
+                  />
+                  <span class="h-2 w-2 shrink-0 rounded-full" style="background:{color}"></span>
+                  <span class="min-w-0 truncate text-xs text-slate-400">{record.tid}</span>
+                  <span class="ml-auto shrink-0 text-[10px] text-slate-600">{record.pings.length}</span>
+                </label>
+              {/each}
+            {/if}
+          </div>
+        {/each}
+      </div>
+    </div>
+  {/if}
 
   <!-- Feed tree -->
   <div class="flex min-h-0 flex-1 flex-col">

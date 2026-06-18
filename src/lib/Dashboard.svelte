@@ -4,6 +4,9 @@
   import type { ApiVehicleAssignment } from './api';
   import SpaceTimeChart from './charts/SpaceTimeChart.svelte';
   import DistanceTimeChart from './charts/DistanceTimeChart.svelte';
+  import DatePicker from './DatePicker.svelte';
+  import NetworkTab from './NetworkTab.svelte';
+  import SchedulePenalties from './SchedulePenalties.svelte';
 
   let {
     dates,
@@ -23,8 +26,17 @@
     onBack: () => void;
   } = $props();
 
-  let activeTab = $state<'stops' | 'schedules'>('stops');
+  let activeTab = $state<'network' | 'schedules'>('network');
   let selectedBlockId = $state<string>('');
+
+  import type { VehiclePosition } from './liveTypes';
+  import { makeEpochToMin, buildSortedPings, matchBlockPings } from './schedulePings';
+  import type { BlockPingData } from './schedulePings';
+  import { parseTimeMin } from './popupUtils';
+  import { pingCacheGet, pingCacheSet } from './pingDataCache';
+  // Callback registered by SchedulePenalties when a stop edit is open;
+  // passed into SpaceTimeChart so clicking a live dot assigns it to the stop.
+  let chartPickHandler = $state<((ping: VehiclePosition) => void) | null>(null);
 
   const blockIds = $derived.by(() => {
     const ids = [...new Set(vehicleAssignments.map(a => a.block_id).filter(Boolean))];
@@ -62,23 +74,70 @@
     }).sort((a, b) => a.departure.localeCompare(b.departure));
   });
 
-  // Live positions filtered to current block's trips
+  // Live positions filtered to current block's trips (used for charts)
   const blockLivePositions = $derived.by(() => {
     const tripSet = new Set(blockTripIds);
     return (liveData?.vehiclePositions ?? []).filter(p => p.trip_id && tripSet.has(p.trip_id));
+  });
+
+  // All unfiltered pings from the vehicles that operate this block.
+  // Used for endpoint-matching in penalty calculations, so early departures and
+  // late arrivals outside the trip_id assignment window are captured.
+  const blockVehiclePings = $derived.by(() => {
+    const tripSet = new Set(blockTripIds);
+    const vehicleIds = new Set(
+      (liveData?.vehiclePositions ?? [])
+        .filter(p => p.trip_id && tripSet.has(p.trip_id))
+        .map(p => p.vehicle_id)
+        .filter((v): v is string => !!v),
+    );
+    if (vehicleIds.size === 0) return blockLivePositions;
+    return (liveData?.vehiclePositions ?? []).filter(p => vehicleIds.has(p.vehicle_id));
+  });
+
+  let blockPingData   = $state<BlockPingData | null>(null);
+  let isPingComputing = $state(false);
+
+  $effect(() => {
+    const bid   = selectedBlockId;
+    const date  = selectedDate;
+    const tids  = blockTripIds;
+    const pings = blockVehiclePings;
+    const gdata = gtfsData;
+
+    if (!gdata || tids.length === 0 || pings.length === 0) {
+      blockPingData = null; isPingComputing = false; return;
+    }
+
+    const cached = pingCacheGet(bid, date);
+    if (cached) {
+      blockPingData = cached; isPingComputing = false; return;
+    }
+
+    isPingComputing = true;
+    blockPingData   = null;
+
+    const timer = setTimeout(() => {
+      const tz     = [...gdata.agencies.values()][0]?.agency_timezone ?? 'UTC';
+      const etm    = makeEpochToMin(tz);
+      const sorted = [...tids].sort((a, b) => {
+        const aMin = parseTimeMin((gdata.stopTimesByTrip.get(a)?.[0]?.departure_time ?? gdata.stopTimesByTrip.get(a)?.[0]?.arrival_time) ?? '');
+        const bMin = parseTimeMin((gdata.stopTimesByTrip.get(b)?.[0]?.departure_time ?? gdata.stopTimesByTrip.get(b)?.[0]?.arrival_time) ?? '');
+        return aMin - bMin;
+      });
+      const result = matchBlockPings(sorted, buildSortedPings(pings, etm), gdata);
+      pingCacheSet(bid, date, result);
+      blockPingData   = result;
+      isPingComputing = false;
+    }, 0);
+
+    return () => clearTimeout(timer);
   });
 
   const dateIndex = $derived(dates.indexOf(selectedDate));
 
   function prevDate() { if (dateIndex > 0) onDateChange(dates[dateIndex - 1]); }
   function nextDate() { if (dateIndex < dates.length - 1) onDateChange(dates[dateIndex + 1]); }
-
-  function formatDate(yyyymmdd: string): string {
-    const y = yyyymmdd.slice(0, 4), m = yyyymmdd.slice(4, 6), d = yyyymmdd.slice(6, 8);
-    return new Date(`${y}-${m}-${d}T12:00:00Z`).toLocaleDateString('en-GB', {
-      day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC',
-    });
-  }
 </script>
 
 <div class="flex h-screen w-screen flex-col bg-slate-950 text-white">
@@ -107,9 +166,7 @@
           <path stroke-linecap="round" stroke-linejoin="round" d="M10 3L5 8l5 5"/>
         </svg>
       </button>
-      <span class="min-w-[120px] text-center text-xs font-medium text-slate-200">
-        {selectedDate ? formatDate(selectedDate) : '—'}
-      </span>
+      <DatePicker {dates} {selectedDate} onSelect={onDateChange} direction="down" />
       <button
         class="flex h-7 w-7 items-center justify-center rounded-md text-slate-400 hover:bg-slate-700 hover:text-slate-200 transition-colors disabled:opacity-30"
         onclick={nextDate} disabled={dateIndex >= dates.length - 1} aria-label="Next date"
@@ -123,13 +180,13 @@
 
   <!-- Tabs -->
   <div class="flex shrink-0 border-b border-slate-800 bg-slate-900 px-4">
-    {#each (['stops', 'schedules'] as const) as tab}
+    {#each (['network', 'schedules'] as const) as tab}
       <button
         class="relative px-4 py-3 text-sm font-medium transition-colors
                {activeTab === tab ? 'text-white' : 'text-slate-400 hover:text-slate-200'}"
         onclick={() => (activeTab = tab)}
       >
-        {tab === 'stops' ? 'Stops' : 'Schedules'}
+        {tab === 'network' ? 'Network' : 'Schedules'}
         {#if activeTab === tab}
           <span class="absolute bottom-0 left-0 right-0 h-0.5 rounded-t bg-indigo-500"></span>
         {/if}
@@ -140,10 +197,8 @@
   <!-- Tab content -->
   <div class="flex-1 overflow-auto">
 
-    {#if activeTab === 'stops'}
-      <div class="flex h-full items-center justify-center">
-        <p class="text-sm text-slate-500">Stop reports coming soon.</p>
-      </div>
+    {#if activeTab === 'network'}
+      <NetworkTab {gtfsData} {vehicleAssignments} {liveData} date={selectedDate} />
 
     {:else}
       <!-- Schedules tab -->
@@ -212,36 +267,87 @@
 
         {#if gtfsData && blockTripIds.length > 0}
 
-          <!-- Chart 1: Space-Time Diagram -->
-          <section>
-            <div class="mb-3 flex items-baseline gap-2">
-              <h2 class="text-sm font-semibold text-slate-200">Space–Time Diagram</h2>
-              <span class="text-xs text-slate-500">Stops on Y · Time on X · Lines = scheduled · Dots = live</span>
+          {#if isPingComputing}
+            <!-- Loading screen -->
+            <div class="flex flex-col items-center justify-center gap-5 py-28">
+              <div class="relative h-12 w-12">
+                <svg class="h-12 w-12 text-slate-800" viewBox="0 0 48 48" fill="none">
+                  <circle cx="24" cy="24" r="20" stroke="currentColor" stroke-width="4"/>
+                </svg>
+                <svg class="absolute inset-0 h-12 w-12 animate-spin text-indigo-500" viewBox="0 0 48 48" fill="none">
+                  <path d="M24 4a20 20 0 0 1 20 20" stroke="currentColor" stroke-width="4" stroke-linecap="round"/>
+                </svg>
+              </div>
+              <div class="text-center space-y-1">
+                <p class="text-sm font-semibold text-slate-200">Matching pings to schedule…</p>
+                <p class="text-xs text-slate-500">
+                  {blockTripIds.length} trip{blockTripIds.length !== 1 ? 's' : ''}
+                  · {blockVehiclePings.length} ping{blockVehiclePings.length !== 1 ? 's' : ''}
+                </p>
+              </div>
+              {#if blockTripIds.length > 0}
+                <div class="flex flex-wrap justify-center gap-1.5">
+                  {#each blockTripIds as tid}
+                    <span class="rounded-md border border-slate-800 bg-slate-900 px-2 py-0.5 font-mono text-[10px] text-slate-600">{tid}</span>
+                  {/each}
+                </div>
+              {/if}
             </div>
-            <div class="rounded-xl border border-slate-800 bg-slate-900/40 p-4">
-              <SpaceTimeChart
-                {blockTripIds}
-                {gtfsData}
-                livePositions={blockLivePositions}
-              />
-            </div>
-          </section>
 
-          <!-- Chart 2: Distance-Time Diagram -->
-          <section>
-            <div class="mb-3 flex items-baseline gap-2">
-              <h2 class="text-sm font-semibold text-slate-200">Distance–Time Diagram</h2>
-              <span class="text-xs text-slate-500">Cumulative distance over the day</span>
+          {:else if blockPingData === null}
+            <div class="flex h-40 items-center justify-center text-sm text-slate-500">
+              No live position data available for this block.
             </div>
-            <div class="rounded-xl border border-slate-800 bg-slate-900/40 p-4">
-              <DistanceTimeChart
+
+          {:else}
+
+            <!-- Chart 1: Space-Time Diagram -->
+            <section>
+              <div class="mb-3 flex items-baseline gap-2">
+                <h2 class="text-sm font-semibold text-slate-200">Space–Time Diagram</h2>
+                <span class="text-xs text-slate-500">Stops on Y · Time on X · Lines = scheduled · Dots = live</span>
+              </div>
+              <div class="rounded-xl border border-slate-800 bg-slate-900/40 p-4">
+                <SpaceTimeChart
+                  {blockTripIds}
+                  {gtfsData}
+                  pingData={blockPingData}
+                  onPingSelect={chartPickHandler ?? undefined}
+                />
+              </div>
+            </section>
+
+            <!-- Chart 2: Distance-Time Diagram -->
+            <section>
+              <div class="mb-3 flex items-baseline gap-2">
+                <h2 class="text-sm font-semibold text-slate-200">Distance–Time Diagram</h2>
+                <span class="text-xs text-slate-500">Cumulative distance over the day</span>
+              </div>
+              <div class="rounded-xl border border-slate-800 bg-slate-900/40 p-4">
+                <DistanceTimeChart
+                  {blockTripIds}
+                  {gtfsData}
+                  pingData={blockPingData}
+                />
+              </div>
+            </section>
+
+            <!-- Penalty breakdown -->
+            <section>
+              <div class="mb-3">
+                <h2 class="text-sm font-semibold text-slate-200">Penalty Breakdown</h2>
+              </div>
+              <SchedulePenalties
                 {blockTripIds}
                 {gtfsData}
-                livePositions={blockLivePositions}
-                {selectedDate}
+                pingData={blockPingData}
+                livePositions={blockVehiclePings}
+                onActivatePicker={(handler) => { chartPickHandler = handler; }}
+                onDeactivatePicker={() => { chartPickHandler = null; }}
               />
-            </div>
-          </section>
+            </section>
+
+          {/if}
 
         {/if}
 

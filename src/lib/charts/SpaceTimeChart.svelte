@@ -4,16 +4,19 @@
   import type { Scale, ChartConfiguration } from 'chart.js';
   import type { GtfsData } from '../types';
   import type { VehiclePosition } from '../liveTypes';
+  import type { BlockPingData } from '../schedulePings';
   import { haversineKm, parseTimeMin } from '../popupUtils';
 
   let {
     blockTripIds = [],
     gtfsData,
-    livePositions = [],
+    pingData = null,
+    onPingSelect = undefined,
   }: {
     blockTripIds: string[];
     gtfsData: GtfsData;
-    livePositions?: VehiclePosition[];
+    pingData?: BlockPingData | null;
+    onPingSelect?: (ping: VehiclePosition) => void;
   } = $props();
 
   let showStops = $state(true);
@@ -21,7 +24,11 @@
   let canvas: HTMLCanvasElement;
   let chart: Chart | null = null;
 
+  const TRIP_PALETTE = ['#818cf8','#34d399','#fb923c','#f472b6','#38bdf8','#a78bfa','#4ade80','#facc15','#f87171','#2dd4bf'];
+  function tripColor(blockIdx: number): string { return TRIP_PALETTE[blockIdx % TRIP_PALETTE.length]; }
+
   const tz = $derived([...gtfsData.agencies.values()][0]?.agency_timezone ?? 'UTC');
+  const pingDataByTid = $derived(new Map((pingData?.tripRecords ?? []).map(r => [r.tid, r])));
 
   // Canonical stop order: longest trip among the currently visible (termini-filtered) trips
   const canonicalStops = $derived.by(() => {
@@ -111,59 +118,94 @@
     return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
   }
 
-  // Per-dot metadata, referenced by the tooltip callback via index
-  interface LiveDot { x: number; y: number; vehicleId: string; stopName: string; schedMin: number | null; tripId: string | null }
-  let liveDotCache: LiveDot[] = [];
+  interface LiveDot {
+    x: number; y: number;
+    vehicleId: string; stopName: string; tripId: string;
+    schedMin: number | null;
+    stopIndex: number;
+    totalStops: number;
+    distFromStopM: number;
+    rawPing: VehiclePosition;
+  }
+
+  interface StopMeta { stopName: string; schedMin: number; stopIndex: number; totalStops: number }
 
   // Mutable ref read by Chart.js callbacks — avoids stale closures
   const cfg = {
-    showStops: true,
-    stops: [] as typeof canonicalStops,
-    maxDist: 0.001,
-    tripDatasetCount: 0, // how many leading datasets are trip lines
+    showStops:        true,
+    stops:            [] as typeof canonicalStops,
+    maxDist:          0.001,
+    tripDatasetCount: 0,
+    tripDatasetStops: [] as StopMeta[][],
+    liveDotsByTrip:   [] as LiveDot[][],  // [tripRelIdx][dotIdx]
+    onPingSelect:     undefined as ((ping: VehiclePosition) => void) | undefined,
   };
 
   function buildConfig(): ChartConfiguration {
-    const tripDatasets = visibleTripIds.map(tid => ({
-      type: 'line' as const,
-      label: `Trip ${tid}`,
-      data: (gtfsData.stopTimesByTrip.get(tid) ?? [])
-        .map(st => {
+    cfg.tripDatasetStops = [];
+
+    const tripDatasets = visibleTripIds.map((tid, _) => {
+      const color   = tripColor(blockTripIds.indexOf(tid));
+      const sts     = gtfsData.stopTimesByTrip.get(tid) ?? [];
+      const total   = sts.length;
+      const stopMeta: StopMeta[] = [];
+      const data = sts
+        .map((st, i) => {
           const d = stopDistMap.get(st.stop_id);
-          return d !== undefined
-            ? { x: parseTimeMin(st.departure_time || st.arrival_time), y: d }
-            : null;
+          if (d === undefined) return null;
+          stopMeta.push({
+            stopName:   gtfsData.stops.get(st.stop_id)?.stop_name ?? st.stop_id,
+            schedMin:   parseTimeMin(st.departure_time || st.arrival_time),
+            stopIndex:  i + 1,
+            totalStops: total,
+          });
+          return { x: parseTimeMin(st.departure_time || st.arrival_time), y: d };
         })
-        .filter((p): p is { x: number; y: number } => p !== null),
-      borderColor: '#6366f1',
-      backgroundColor: 'transparent',
-      borderWidth: 1.5,
-      pointRadius: 0,
-      showLine: true,
-      tension: 0,
-    }));
+        .filter((p): p is { x: number; y: number } => p !== null);
+      cfg.tripDatasetStops.push(stopMeta);
+      return {
+        type: 'line' as const,
+        label: `Trip ${tid}`,
+        data,
+        borderColor: color,
+        backgroundColor: 'transparent',
+        borderWidth: 1.5,
+        pointRadius: 0,
+        showLine: true,
+        tension: 0,
+      };
+    });
 
     cfg.tripDatasetCount = tripDatasets.length;
 
+    // One scatter dataset per trip so dots share the trip's color
+    const liveDatasets = visibleTripIds.map((tid, _) => {
+      const color = tripColor(blockTripIds.indexOf(tid));
+      return {
+        type: 'scatter' as const,
+        label: `Live ${tid}`,
+        data: [] as { x: number; y: number }[],
+        backgroundColor: color,
+        pointRadius: 4,
+        pointHoverRadius: 6,
+      };
+    });
+
     return {
       type: 'scatter',
-      data: {
-        datasets: [
-          ...tripDatasets,
-          {
-            type: 'scatter' as const,
-            label: 'Live positions',
-            data: [],
-            backgroundColor: '#34d399',
-            pointRadius: 4,
-            pointHoverRadius: 6,
-          },
-        ],
-      },
+      data: { datasets: [...tripDatasets, ...liveDatasets] },
       options: {
         responsive: true,
         maintainAspectRatio: false,
         animation: false,
+        onClick(_event, elements) {
+          if (!cfg.onPingSelect) return;
+          const liveEl = elements.find(el => el.datasetIndex >= cfg.tripDatasetCount);
+          if (!liveEl) return;
+          const tripRelIdx = liveEl.datasetIndex - cfg.tripDatasetCount;
+          const dot = cfg.liveDotsByTrip[tripRelIdx]?.[liveEl.index];
+          if (dot) cfg.onPingSelect(dot.rawPing);
+        },
         scales: {
           x: {
             type: 'linear',
@@ -218,39 +260,64 @@
         plugins: {
           legend: { display: false },
           tooltip: {
-            backgroundColor: '#1e293b',
-            borderColor: '#475569',
+            backgroundColor: '#0f172a',
+            borderColor: '#334155',
             borderWidth: 1,
             titleColor: '#e2e8f0',
             bodyColor: '#94a3b8',
+            padding: 10,
             callbacks: {
               title(items) {
                 const t = items[0]?.parsed.x;
-                return t != null ? fmtMin(t) : '';
+                return t != null ? `⏱  ${fmtMin(t)}` : '';
               },
               label(item) {
-                const km = item.parsed.y;
+                const km    = item.parsed.y;
                 const dsIdx = item.datasetIndex;
 
-                // Trip line dataset — show stop name + scheduled time
+                // Scheduled trip line
                 if (dsIdx < cfg.tripDatasetCount) {
-                  const stop = cfg.stops.find(s => Math.abs(s.cumDistKm - km) < 0.05);
-                  const stopLabel = stop ? stop.stop_name : `${km.toFixed(2)} km`;
-                  return `${stopLabel}  ·  ${fmtMin(item.parsed.x)}`;
+                  const meta = cfg.tripDatasetStops[dsIdx]?.[item.dataIndex];
+                  if (meta) {
+                    return [
+                      `${meta.stopName}`,
+                      `Stop ${meta.stopIndex}/${meta.totalStops}  ·  ${km.toFixed(2)} km  ·  ${fmtMin(meta.schedMin)}`,
+                    ];
+                  }
+                  return `${km.toFixed(2)} km`;
                 }
 
-                // Live scatter dataset
-                const dot = liveDotCache[item.dataIndex];
+                // Live scatter dot
+                const tripRelIdx = dsIdx - cfg.tripDatasetCount;
+                const dot = cfg.liveDotsByTrip[tripRelIdx]?.[item.dataIndex];
                 if (!dot) return `${km.toFixed(2)} km`;
+
                 const lines: string[] = [];
-                lines.push(`Vehicle ${dot.vehicleId}`);
-                lines.push(`Near: ${dot.stopName || `${km.toFixed(2)} km`}`);
-                lines.push(`Actual time: ${fmtMin(dot.x)}`);
-                if (dot.schedMin !== null) {
-                  const dev = Math.round(dot.x - dot.schedMin);
-                  const sign = dev >= 0 ? '+' : '';
-                  lines.push(`Scheduled: ${fmtMin(dot.schedMin)}  (${sign}${dev} min)`);
+                lines.push(`Vehicle  ${dot.vehicleId}`);
+
+                if (dot.stopName) {
+                  const distStr = dot.distFromStopM < 1000
+                    ? `${Math.round(dot.distFromStopM)} m`
+                    : `${(dot.distFromStopM / 1000).toFixed(1)} km`;
+                  lines.push(`Near  ${dot.stopName}  (${distStr})`);
+                  lines.push(`Stop ${dot.stopIndex}/${dot.totalStops}`);
                 }
+
+                lines.push(`Actual    ${fmtMin(dot.x)}`);
+
+                if (dot.schedMin !== null) {
+                  const devMin = dot.x - dot.schedMin;
+                  const devRnd = Math.round(devMin);
+                  const sign   = devRnd >= 0 ? '+' : '';
+                  const label  = Math.abs(devRnd) <= 1
+                    ? 'on time'
+                    : devRnd > 0
+                      ? `${sign}${devRnd} min  —  late`
+                      : `${devRnd} min  —  early`;
+                  lines.push(`Scheduled ${fmtMin(dot.schedMin)}`);
+                  lines.push(`Deviation  ${label}`);
+                }
+
                 return lines;
               },
             },
@@ -267,46 +334,91 @@
     };
   }
 
-  function computeLiveDots(): LiveDot[] {
-    const visible = new Set(visibleTripIds);
-    return livePositions
-      .filter(p => p.trip_id && visible.has(p.trip_id))
-      .map(p => {
+  function computeLiveDots(): LiveDot[][] {
+    return visibleTripIds.map(tid => {
+      const record = pingDataByTid.get(tid);
+      const pings  = record?.pings ?? [];
+
+      return pings.map(p => {
         const tMin = epochToMin(p.timestamp);
-        let minD = Infinity, km = 0;
-        let snappedStop: typeof canonicalStops[0] | null = null;
-        for (const s of cfg.stops) {
+
+        // Find closest stop in canonical list
+        let closestIdx = -1, closestDist = Infinity;
+        for (let i = 0; i < cfg.stops.length; i++) {
+          const s    = cfg.stops[i];
           const stop = gtfsData.stops.get(s.stop_id);
           if (!stop) continue;
           const d = haversineKm(stop.stop_lat, stop.stop_lon, p.lat, p.lon);
-          if (d < minD) { minD = d; km = s.cumDistKm; snappedStop = s; }
+          if (d < closestDist) { closestDist = d; closestIdx = i; }
         }
-        // Find scheduled time for the snapped stop on this trip
+
+        let km = closestIdx >= 0 ? cfg.stops[closestIdx].cumDistKm : 0;
+        const snappedStop = closestIdx >= 0 ? cfg.stops[closestIdx] : null;
+
+        // Interpolate km between closest stop and nearest neighbor
+        if (closestIdx >= 0) {
+          const candidates: number[] = [];
+          if (closestIdx - 1 >= 0) candidates.push(closestIdx - 1);
+          if (closestIdx + 1 < cfg.stops.length) candidates.push(closestIdx + 1);
+
+          let neighborIdx = -1, neighborDist = Infinity;
+          for (const ni of candidates) {
+            const ns    = cfg.stops[ni];
+            const nStop = gtfsData.stops.get(ns.stop_id);
+            if (!nStop) continue;
+            const nd = haversineKm(nStop.stop_lat, nStop.stop_lon, p.lat, p.lon);
+            if (nd < neighborDist) { neighborDist = nd; neighborIdx = ni; }
+          }
+
+          if (neighborIdx >= 0 && (closestDist + neighborDist) > 0) {
+            km = (cfg.stops[closestIdx].cumDistKm * neighborDist + cfg.stops[neighborIdx].cumDistKm * closestDist)
+              / (closestDist + neighborDist);
+          }
+        }
+
         let schedMin: number | null = null;
-        if (snappedStop && p.trip_id) {
-          const sts = gtfsData.stopTimesByTrip.get(p.trip_id) ?? [];
-          const st = sts.find(s => s.stop_id === snappedStop!.stop_id);
-          if (st) schedMin = parseTimeMin(st.arrival_time || st.departure_time);
+        let stopIndex = 0, totalStops = 0;
+        if (snappedStop) {
+          const sts = gtfsData.stopTimesByTrip.get(tid) ?? [];
+          totalStops = sts.length;
+          const idx  = sts.findIndex(s => s.stop_id === snappedStop.stop_id);
+          if (idx !== -1) {
+            stopIndex = idx + 1;
+            schedMin  = parseTimeMin(sts[idx].arrival_time || sts[idx].departure_time);
+          }
         }
-        return { x: tMin, y: km, vehicleId: p.vehicle_id, stopName: snappedStop?.stop_name ?? '', schedMin, tripId: p.trip_id };
+
+        return {
+          x: tMin, y: km,
+          vehicleId:     p.vehicle_id ?? '',
+          stopName:      snappedStop?.stop_name ?? '',
+          tripId:        tid,
+          schedMin,
+          stopIndex,
+          totalStops,
+          distFromStopM: isFinite(closestDist) ? closestDist * 1000 : 0,
+          rawPing:       p,
+        };
       });
+    });
   }
 
   function updateLiveData() {
     if (!chart) return;
-    const liveDs = chart.data.datasets.find(d => d.label === 'Live positions');
-    if (liveDs) {
-      liveDotCache = computeLiveDots();
-      (liveDs as { data: unknown[] }).data = liveDotCache;
-      chart.update('none');
+    cfg.liveDotsByTrip = computeLiveDots();
+    for (let i = 0; i < visibleTripIds.length; i++) {
+      const ds = chart.data.datasets[cfg.tripDatasetCount + i];
+      if (ds) (ds as { data: unknown[] }).data = cfg.liveDotsByTrip[i];
     }
+    chart.update('none');
   }
 
   $effect(() => {
     const _v = visibleTripIds; const _s = showStops; const _c = canonicalStops; const _t = timeRange;
-    cfg.stops    = canonicalStops;
-    cfg.maxDist  = maxDist;
-    cfg.showStops = showStops;
+    cfg.stops       = canonicalStops;
+    cfg.maxDist     = maxDist;
+    cfg.showStops   = showStops;
+    cfg.onPingSelect = onPingSelect;
     if (!canvas) return;
     chart?.destroy();
     chart = new Chart(canvas, buildConfig());
@@ -314,7 +426,12 @@
   });
 
   $effect(() => {
-    const _l = livePositions;
+    cfg.onPingSelect = onPingSelect;
+    if (canvas) canvas.style.cursor = onPingSelect ? 'crosshair' : 'default';
+  });
+
+  $effect(() => {
+    const _p = pingData;
     untrack(() => updateLiveData());
   });
 
@@ -351,13 +468,16 @@
       <span class="text-xs text-slate-400">Show stops</span>
     </label>
 
-    <div class="ml-auto flex items-center gap-4 text-[10px] text-slate-500">
-      <span class="flex items-center gap-1.5">
-        <span class="h-px w-6 bg-indigo-400 inline-block"></span>Scheduled
-      </span>
-      <span class="flex items-center gap-1.5">
-        <span class="h-2 w-2 rounded-full bg-emerald-400 inline-block"></span>Live
-      </span>
+    <!-- Per-trip colour legend -->
+    <div class="ml-auto flex flex-wrap items-center gap-3 text-[10px]">
+      {#each visibleTripIds as tid}
+        {@const c = tripColor(blockTripIds.indexOf(tid))}
+        <span class="flex items-center gap-1.5" style:color={c}>
+          <span class="inline-block h-px w-5" style:background={c}></span>
+          <span class="inline-block h-2 w-2 rounded-full" style:background={c}></span>
+          {tid}
+        </span>
+      {/each}
     </div>
 
     <button
@@ -372,10 +492,19 @@
     </button>
   </div>
 
+  {#if onPingSelect}
+    <div class="mb-2 flex items-center gap-2 rounded-lg border border-violet-700/50 bg-violet-950/40 px-3 py-2 text-xs text-violet-300">
+      <svg class="h-3.5 w-3.5 shrink-0" fill="none" viewBox="0 0 16 16" stroke="currentColor" stroke-width="1.5">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M8 2a6 6 0 100 12A6 6 0 008 2zm0 0v2m0 8v2M2 8H4m8 0h2"/>
+      </svg>
+      Click a live dot to assign it to the selected stop
+    </div>
+  {/if}
+
   {#if canonicalStops.length === 0}
     <div class="flex h-48 items-center justify-center text-sm text-slate-500">No stop data for this block.</div>
   {:else}
-    <div class="h-[450px]">
+    <div class="h-[450px] {onPingSelect ? 'ring-1 ring-violet-600/40 rounded-lg overflow-hidden' : ''}">
       <canvas bind:this={canvas}></canvas>
     </div>
   {/if}

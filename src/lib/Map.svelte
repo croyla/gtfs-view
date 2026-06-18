@@ -5,6 +5,7 @@
   import { Protocol } from 'pmtiles';
   import type { Feature, FeatureCollection, LineString, Point } from 'geojson';
   import type { GtfsData, ShapePoint } from './types';
+  import type { VehiclePosition } from './liveTypes';
 
   let {
     gtfsData     = null,
@@ -14,6 +15,9 @@
     showShapes  = true,
     showStops   = true,
     showHeatmap = false,
+    vehiclePositions = [] as VehiclePosition[],
+    tripPingLayers = [] as Array<{ tid: string; color: string; pings: VehiclePosition[] }>,
+    isLatestDate = true,
     onStopClick,
     onShapeClick,
   }: {
@@ -24,6 +28,9 @@
     showShapes?: boolean;
     showStops?: boolean;
     showHeatmap?: boolean;
+    vehiclePositions?: VehiclePosition[];
+    tripPingLayers?: Array<{ tid: string; color: string; pings: VehiclePosition[] }>;
+    isLatestDate?: boolean;
     onStopClick?: (stopId: string) => void;
     onShapeClick?: (shapeId: string) => void;
   } = $props();
@@ -46,7 +53,79 @@
     });
     map.addControl(new maplibregl.NavigationControl(), 'top-right');
     map.addControl(new maplibregl.ScaleControl(), 'bottom-left');
-    map.on('load', () => { mapReady = true; });
+    map.on('load', () => {
+      mapReady = true;
+
+      // Live vehicle source and layers
+      map.addSource('live-vehicles', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] },
+      });
+
+      map.addLayer({
+        id: 'live-vehicles',
+        type: 'circle',
+        source: 'live-vehicles',
+        paint: {
+          'circle-color': '#34d399',
+          'circle-radius': 6,
+          'circle-stroke-color': '#0f172a',
+          'circle-stroke-width': 1.5,
+        },
+      });
+
+      map.addLayer({
+        id: 'live-vehicles-labels',
+        type: 'symbol',
+        source: 'live-vehicles',
+        layout: {
+          'text-field': ['get', 'vehicle_id'],
+          'text-size': 10,
+          'text-offset': [0, 1.3],
+          'text-anchor': 'top',
+        },
+        paint: {
+          'text-color': '#94a3b8',
+          'text-halo-color': '#0f172a',
+          'text-halo-width': 1.5,
+        },
+      });
+
+      // Per-trip ping trails (coloured lines)
+      map.addSource('trip-trails', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] },
+      });
+      map.addLayer({
+        id: 'trip-trails',
+        type: 'line',
+        source: 'trip-trails',
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: {
+          'line-color': ['get', 'color'],
+          'line-width': 1.5,
+          'line-opacity': 0.55,
+        },
+      });
+
+      // Per-trip ping dots (coloured circles on top of trails)
+      map.addSource('trip-pings', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] },
+      });
+      map.addLayer({
+        id: 'trip-pings',
+        type: 'circle',
+        source: 'trip-pings',
+        paint: {
+          'circle-radius': 4,
+          'circle-color': ['get', 'color'],
+          'circle-stroke-color': '#0f172a',
+          'circle-stroke-width': 1,
+          'circle-opacity': 0.9,
+        },
+      });
+    });
 
     map.on('click', 'gtfs-stops', (e) => {
       const stopId = e.features?.[0]?.properties?.stop_id as string | undefined;
@@ -170,7 +249,71 @@
     }
   });
 
+  // ── Vehicle positions effect ──────────────────────────────────────────────────
+
+  $effect(() => {
+    const positions = vehiclePositions;
+    const latest    = isLatestDate;
+    if (!mapReady) return;
+
+    const liveSource = map.getSource('live-vehicles') as maplibregl.GeoJSONSource | undefined;
+    const empty: FeatureCollection = { type: 'FeatureCollection', features: [] };
+    const show = latest ? 'visible' : 'none';
+
+    liveSource?.setData(latest ? buildVehicleGeoJSON(positions) : empty);
+    if (map.getLayer('live-vehicles'))        map.setLayoutProperty('live-vehicles',        'visibility', show);
+    if (map.getLayer('live-vehicles-labels')) map.setLayoutProperty('live-vehicles-labels', 'visibility', show);
+  });
+
+  // ── Trip ping layers effect ───────────────────────────────────────────────────
+
+  $effect(() => {
+    const layers = tripPingLayers;
+    if (!mapReady) return;
+    const dotSrc   = map.getSource('trip-pings')  as maplibregl.GeoJSONSource | undefined;
+    const trailSrc = map.getSource('trip-trails') as maplibregl.GeoJSONSource | undefined;
+    if (!dotSrc || !trailSrc) return;
+
+    const dotFeatures:   Feature<Point>[]      = [];
+    const trailFeatures: Feature<LineString>[] = [];
+
+    for (const { tid, color, pings } of layers) {
+      const sorted = [...pings].sort((a, b) => a.timestamp - b.timestamp);
+      for (const p of sorted) {
+        dotFeatures.push({
+          type: 'Feature',
+          properties: { color, trip_id: tid },
+          geometry: { type: 'Point', coordinates: [p.lon, p.lat] },
+        });
+      }
+      if (sorted.length >= 2) {
+        trailFeatures.push({
+          type: 'Feature',
+          properties: { color, trip_id: tid },
+          geometry: { type: 'LineString', coordinates: sorted.map(p => [p.lon, p.lat]) },
+        });
+      }
+    }
+
+    dotSrc.setData({ type: 'FeatureCollection', features: dotFeatures });
+    trailSrc.setData({ type: 'FeatureCollection', features: trailFeatures });
+  });
+
   // ── Helpers ──────────────────────────────────────────────────────────────────
+
+  function buildVehicleGeoJSON(positions: VehiclePosition[]): FeatureCollection {
+    const latest = new Map<string, VehiclePosition>();
+    for (const p of positions) {
+      const existing = latest.get(p.vehicle_id);
+      if (!existing || p.timestamp > existing.timestamp) latest.set(p.vehicle_id, p);
+    }
+    const features: Feature<Point>[] = [...latest.values()].map(p => ({
+      type: 'Feature',
+      properties: { vehicle_id: p.vehicle_id, trip_id: p.trip_id ?? null },
+      geometry: { type: 'Point', coordinates: [p.lon, p.lat] },
+    }));
+    return { type: 'FeatureCollection', features };
+  }
 
   function makeFilter(prop: string, ids: Set<string>): FilterSpecification {
     if (ids.size === 0) return ['boolean', false] as FilterSpecification;

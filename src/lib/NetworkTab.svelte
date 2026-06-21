@@ -4,7 +4,6 @@
   import type { ApiVehicleAssignment } from './api';
   import { haversineKm, parseTimeMin } from './popupUtils';
   import { makeEpochToMin, buildSortedPings, matchBlockPings } from './schedulePings';
-  import { computeBlockMetrics, DEFAULT_PUNCT_SETTINGS } from './scheduleMetrics';
   import { pingCacheGet, pingCacheSet } from './pingDataCache';
 
   let {
@@ -19,8 +18,6 @@
     date?: string;
   } = $props();
 
-  let constantC = $state(1.0);
-
   const tz         = $derived([...gtfsData.agencies.values()][0]?.agency_timezone ?? 'UTC');
   const epochToMin = $derived(makeEpochToMin(tz));
 
@@ -30,22 +27,18 @@
     return ids;
   });
 
-  interface TripCompletionSummary { tiers: Record<string, number>; totalPenaltyTrips: number }
   interface BlockRow {
-    blockId:    string;
-    T:          number;
-    L:          number;
-    A:          number;
-    t:          number;
-    sdi:        number | null;
-    observations: number;
-    hasLive:    boolean;
-    tcSummary:  TripCompletionSummary;
-    punctNetPct:number;       // net % of monthly fee (positive = deduction)
-    dataPenPct: number;       // total % of monthly fee
+    blockId:          string;
+    schedDurationMin: number;
+    schedDistKm:      number;
+    schedTrips:       number;
+    obsDurationMin:   number;
+    obsDistKm:        number;
+    obsTrips:         number;
+    hasLive:          boolean;
   }
 
-  function computeBlock(blockId: string, C: number): BlockRow {
+  function computeBlock(blockId: string): BlockRow {
     const tripIds = vehicleAssignments
       .filter(a => a.block_id === blockId)
       .map(a => a.trip_id)
@@ -58,82 +51,82 @@
            - (bSts[0] ? parseTimeMin(bSts[0].departure_time || bSts[0].arrival_time) : 0);
     });
 
-    const T = sorted.length;
+    const schedTrips = sorted.length;
+    let schedDistKm  = 0;
 
-    let L = 0;
-    if (sorted.length > 0) {
-      const fSts = gtfsData.stopTimesByTrip.get(sorted[0]) ?? [];
-      const lSts = gtfsData.stopTimesByTrip.get(sorted.at(-1)!) ?? [];
-      const lo = fSts[0]     ? parseTimeMin(fSts[0].departure_time     || fSts[0].arrival_time)         : 0;
-      const hi = lSts.at(-1) ? parseTimeMin(lSts.at(-1)!.arrival_time || lSts.at(-1)!.departure_time) : 0;
-      L = Math.max(0, hi - lo);
+    // Block duration = span from first stop of first trip to last stop of last trip
+    const firstSts     = gtfsData.stopTimesByTrip.get(sorted[0] ?? '') ?? [];
+    const lastSts      = gtfsData.stopTimesByTrip.get(sorted.at(-1) ?? '') ?? [];
+    const schedBlockLo = firstSts[0]      ? parseTimeMin(firstSts[0].departure_time      || firstSts[0].arrival_time)         : 0;
+    const schedBlockHi = lastSts.at(-1)   ? parseTimeMin(lastSts.at(-1)!.arrival_time    || lastSts.at(-1)!.departure_time)   : 0;
+    const schedDurationMin = Math.max(0, schedBlockHi - schedBlockLo);
+
+    for (let i = 0; i < sorted.length; i++) {
+      const sts = gtfsData.stopTimesByTrip.get(sorted[i]) ?? [];
+
+      // Route distance for this trip
+      for (let s = 1; s < sts.length; s++) {
+        const sA = gtfsData.stops.get(sts[s - 1].stop_id);
+        const sB = gtfsData.stops.get(sts[s].stop_id);
+        if (sA && sB)
+          schedDistKm += haversineKm(sA.stop_lat, sA.stop_lon, sB.stop_lat, sB.stop_lon);
+      }
+
+      // Deadhead segment between trips
+      if (i > 0) {
+        const prevSts    = gtfsData.stopTimesByTrip.get(sorted[i - 1]) ?? [];
+        const prevLast   = gtfsData.stops.get(prevSts.at(-1)?.stop_id ?? '');
+        const currFirst  = gtfsData.stops.get(sts[0]?.stop_id ?? '');
+        if (prevLast && currFirst)
+          schedDistKm += haversineKm(prevLast.stop_lat, prevLast.stop_lon, currFirst.stop_lat, currFirst.stop_lon);
+      }
     }
 
-    const allPositions = liveData?.vehiclePositions ?? [];
-    const tripSet      = new Set(sorted);
-    const taggedPings  = allPositions.filter(p => p.trip_id && tripSet.has(p.trip_id));
-    const blockVehicleIds = new Set(taggedPings.map(p => p.vehicle_id).filter(v => !!v));
+    const allPositions    = liveData?.vehiclePositions ?? [];
+    const tripSet         = new Set(sorted);
+    const taggedPings     = allPositions.filter(p => p.trip_id && tripSet.has(p.trip_id));
+    const blockVehicleIds = new Set(taggedPings.map(p => p.vehicle_id).filter((v): v is string => !!v));
     const rawVehiclePings = blockVehicleIds.size > 0
-      ? allPositions.filter(p => blockVehicleIds.has(p.vehicle_id))
+      ? allPositions.filter(p => blockVehicleIds.has(p.vehicle_id!))
       : taggedPings;
     const hasLive = rawVehiclePings.length > 0;
 
-    // Build sorted ping arrays once — used by binary-search matching
-    const sortedVehiclePings = buildSortedPings(rawVehiclePings, epochToMin);
-    const sortedTaggedPings  = buildSortedPings(taggedPings,     epochToMin);
+    let obsDurationMin  = 0;
+    let obsDistKm       = 0;
+    let obsTrips        = 0;
+    let obsBlockFirstT: number | null = null;
+    let obsBlockLastT:  number | null = null;
 
-    // SDI component A: deviation of tagged pings from nearest scheduled stop.
-    // Pre-compute stop positions + schedMin per trip to avoid repeated Map lookups.
-    let sumSq = 0, observations = 0;
-    type StopInfo = { lat: number; lon: number; schedMin: number };
-    const stopCache = new Map<string, StopInfo[]>();
-    for (const pw of sortedTaggedPings) {
-      const tid = pw.p.trip_id!;
-      let stops = stopCache.get(tid);
-      if (!stops) {
-        const sts = gtfsData.stopTimesByTrip.get(tid) ?? [];
-        stops = [];
-        for (const st of sts) {
-          const s = gtfsData.stops.get(st.stop_id);
-          if (s) stops.push({ lat: s.stop_lat, lon: s.stop_lon, schedMin: parseTimeMin(st.arrival_time || st.departure_time) });
+    if (hasLive) {
+      const sortedVehiclePings = buildSortedPings(rawVehiclePings, epochToMin);
+      const pingData = pingCacheGet(blockId, date) ?? (() => {
+        const pd = matchBlockPings(sorted, sortedVehiclePings, gtfsData);
+        pingCacheSet(blockId, date, pd);
+        return pd;
+      })();
+
+      for (const record of pingData.tripRecords) {
+        const visited = record.stopMatches.filter(m => m.visited);
+        if (visited.length === 0) continue;
+        obsTrips++;
+
+        // Track overall block span (first matched ping across all trips → last)
+        const tFirst = visited[0].matchedPingT!;
+        const tLast  = visited.at(-1)!.matchedPingT!;
+        if (obsBlockFirstT === null || tFirst < obsBlockFirstT) obsBlockFirstT = tFirst;
+        if (obsBlockLastT  === null || tLast  > obsBlockLastT)  obsBlockLastT  = tLast;
+
+        for (let s = 1; s < record.stopMatches.length; s++) {
+          if (record.stopMatches[s - 1].visited && record.stopMatches[s].visited)
+            obsDistKm += record.stopMatches[s].cumDistKm - record.stopMatches[s - 1].cumDistKm;
         }
-        stopCache.set(tid, stops);
       }
-      let minDist = Infinity, nearestSchedMin: number | null = null;
-      for (const s of stops) {
-        const d = haversineKm(s.lat, s.lon, pw.p.lat, pw.p.lon);
-        if (d < minDist) { minDist = d; nearestSchedMin = s.schedMin; }
-      }
-      if (nearestSchedMin !== null) { sumSq += (pw.t - nearestSchedMin) ** 2; observations++; }
-    }
-    const A = Math.sqrt(sumSq);
 
-    const pingData   = pingCacheGet(blockId, date) ?? (() => {
-      const pd = matchBlockPings(sorted, sortedVehiclePings, gtfsData);
-      pingCacheSet(blockId, date, pd);
-      return pd;
-    })();
-    const metrics    = computeBlockMetrics(pingData, taggedPings, gtfsData);
-    const t          = hasLive ? metrics.skippedCount : 0;
-    const sdi        = hasLive && L > 0 && T > 0 ? (A / L) + (C * t / T) : null;
-
-    const tiers: Record<string, number> = {};
-    let totalPenaltyTrips = 0;
-    for (const r of metrics.completions) {
-      if (r.tier !== 'complete' && r.tier !== 'no-data') {
-        tiers[r.tier] = (tiers[r.tier] ?? 0) + 1;
-        totalPenaltyTrips++;
-      }
+      if (obsBlockFirstT !== null && obsBlockLastT !== null)
+        obsDurationMin = Math.max(0, obsBlockLastT - obsBlockFirstT);
     }
 
-    return {
-      blockId,
-      T, L: Math.round(L), A, t,
-      sdi, observations, hasLive,
-      tcSummary:  { tiers, totalPenaltyTrips },
-      punctNetPct: metrics.punctuality.totalNetPct,
-      dataPenPct:  metrics.dataAvailability.totalPenaltyPct,
-    };
+    return { blockId, schedDurationMin, schedDistKm, schedTrips, obsDurationMin, obsDistKm, obsTrips, hasLive };
   }
 
   let rankedBlocks = $state<BlockRow[]>([]);
@@ -144,87 +137,64 @@
     calculating  = true;
     calculated   = false;
     rankedBlocks = [];
-    // Defer computation by one frame so the loading state renders first
     setTimeout(() => {
-      const C = constantC;
-      const rows = blockIds.map(bid => computeBlock(bid, C));
-      rows.sort((a, b) => {
-        if (a.sdi === null && b.sdi === null) return 0;
-        if (a.sdi === null) return 1;
-        if (b.sdi === null) return -1;
-        return a.sdi - b.sdi;
-      });
-      rankedBlocks = rows;
+      rankedBlocks = blockIds.map(bid => computeBlock(bid));
       calculated   = true;
       calculating  = false;
     }, 0);
   }
 
-  function sdiClass(sdi: number): string {
-    if (sdi < 0.05) return 'text-emerald-400';
-    if (sdi < 0.2)  return 'text-yellow-400';
-    return 'text-red-400';
+  function fmtDuration(min: number): string {
+    const h = Math.floor(min / 60);
+    const m = Math.round(min % 60);
+    return h > 0 ? `${h}h ${m}m` : `${m}m`;
   }
 
-  function fmtNetPct(pct: number): string {
-    if (pct === 0) return '—';
-    const sign = pct > 0 ? '−' : '+'; // positive = deduction; negative = incentive
-    return `${sign}${Math.abs(pct).toFixed(1)}%`;
-  }
-
-  function netPctClass(pct: number): string {
-    if (pct > 0) return 'text-red-400';
-    if (pct < 0) return 'text-emerald-400';
-    return 'text-slate-500';
-  }
-
-  function tierSummary(s: TripCompletionSummary): string {
-    if (s.totalPenaltyTrips === 0) return '—';
-    return Object.entries(s.tiers).map(([tier, n]) => `${n}×${tier}`).join(' ');
+  function fmtDist(km: number): string {
+    return `${km.toFixed(2)} km`;
   }
 </script>
 
-<div class="mx-auto max-w-6xl space-y-6 p-6">
+<div class="mx-auto max-w-7xl space-y-6 p-6">
 
-  <!-- Controls + formula -->
-  <div class="flex flex-wrap items-start gap-4 rounded-xl border border-slate-800 bg-slate-900/40 p-4">
-    <div class="flex items-center gap-3">
-      <label class="text-xs font-medium text-slate-400 shrink-0" for="const-c">Missed trip weight (C)</label>
-      <input
-        id="const-c"
-        type="number" min="0" step="0.1"
-        bind:value={constantC}
-        class="w-20 rounded-lg border border-slate-700 bg-slate-800 px-2 py-1.5 text-sm text-white text-center
-               focus:border-indigo-500 focus:outline-none"
-      />
-      <button
-        onclick={calculate}
-        disabled={calculating}
-        class="flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-1.5 text-sm font-medium text-white
-               hover:bg-indigo-500 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
-      >
-        {#if calculating}
-          <svg class="h-3.5 w-3.5 animate-spin" viewBox="0 0 24 24" fill="none">
-            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
-            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/>
-          </svg>
-          Calculating…
-        {:else}
-          Calculate
-        {/if}
-      </button>
-    </div>
-    <div class="flex-1 space-y-1">
-      <p class="font-mono text-xs text-slate-400">SDI = (A / L) + (C × t / T)</p>
-      <div class="flex flex-wrap gap-x-4 gap-y-0.5 text-[11px] text-slate-600">
-        <span><span class="text-slate-500">A</span> = √Σdev²</span>
-        <span><span class="text-slate-500">L</span> = schedule length (min)</span>
-        <span><span class="text-slate-500">t</span> = trips with &lt;20 m displacement from start</span>
-        <span><span class="text-slate-500">T</span> = total trips</span>
-        <span>Punct. threshold: ±{DEFAULT_PUNCT_SETTINGS.startThresholdMin} min start / ±{DEFAULT_PUNCT_SETTINGS.endThresholdMin} min arrival</span>
-      </div>
-    </div>
+  <!-- Controls -->
+  <div class="flex items-center gap-4 rounded-xl border border-slate-800 bg-slate-900/40 p-4">
+    <button
+      onclick={calculate}
+      disabled={calculating}
+      class="flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-1.5 text-sm font-medium text-white
+             hover:bg-indigo-500 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+    >
+      {#if calculating}
+        <svg class="h-3.5 w-3.5 animate-spin" viewBox="0 0 24 24" fill="none">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/>
+        </svg>
+        Calculating…
+      {:else}
+        Calculate
+      {/if}
+    </button>
+    <span class="text-xs text-slate-500">{blockIds.length} block{blockIds.length !== 1 ? 's' : ''}</span>
   </div>
+
+  <!--
+  === OLD SDI TABLE (commented out) ===
+  <div class="overflow-x-auto overflow-hidden rounded-xl border border-slate-800">
+    <table class="w-full text-sm">
+      <thead>
+        <tr class="border-b border-slate-800 bg-slate-900/60">
+          <th>#</th><th>Block</th><th>SDI</th><th>A</th><th>L</th>
+          <th>t</th><th>T</th><th>Obs.</th>
+          <th>Trip Completion Penalties</th>
+          <th>Punctuality Penalties</th>
+          <th>Other Penalties</th>
+        </tr>
+      </thead>
+      <tbody>...</tbody>
+    </table>
+  </div>
+  -->
 
   <!-- Table -->
   {#if calculating}
@@ -237,9 +207,9 @@
     </div>
   {:else if !calculated}
     <div class="flex h-40 items-center justify-center text-sm text-slate-500">
-      Set parameters above and press
+      Press
       <span class="mx-1.5 rounded bg-slate-800 px-2 py-0.5 font-mono text-xs text-slate-300">Calculate</span>
-      to rank schedules.
+      to compute block metrics.
     </div>
   {:else if rankedBlocks.length === 0}
     <div class="flex h-40 items-center justify-center text-sm text-slate-500">No schedule data available.</div>
@@ -247,67 +217,73 @@
     <div class="overflow-x-auto overflow-hidden rounded-xl border border-slate-800">
       <table class="w-full text-sm">
         <thead>
+          <tr class="border-b border-slate-700 bg-slate-900/80">
+            <th colspan="2" class="px-3 py-2 text-left text-[10px] font-semibold uppercase tracking-wider text-slate-500"></th>
+            <th colspan="3" class="border-l border-slate-700 px-3 py-2 text-center text-[10px] font-semibold uppercase tracking-wider text-indigo-400/70">Scheduled</th>
+            <th colspan="4" class="border-l border-slate-700 px-3 py-2 text-center text-[10px] font-semibold uppercase tracking-wider text-emerald-400/70">Observed</th>
+            <th colspan="4" class="border-l border-slate-700 px-3 py-2 text-center text-[10px] font-semibold uppercase tracking-wider text-orange-400/70">Penalties</th>
+          </tr>
           <tr class="border-b border-slate-800 bg-slate-900/60">
-            <th class="px-3 py-3 text-left   text-[11px] font-medium uppercase tracking-wider text-slate-500">#</th>
-            <th class="px-3 py-3 text-left   text-[11px] font-medium uppercase tracking-wider text-slate-500">Block</th>
-            <th class="px-3 py-3 text-right  text-[11px] font-medium uppercase tracking-wider text-slate-500">SDI ↑</th>
-            <th class="px-3 py-3 text-right  text-[11px] font-medium uppercase tracking-wider text-slate-500" title="√(Σ deviation²)">A</th>
-            <th class="px-3 py-3 text-right  text-[11px] font-medium uppercase tracking-wider text-slate-500" title="Schedule length">L</th>
-            <th class="px-3 py-3 text-right  text-[11px] font-medium uppercase tracking-wider text-slate-500" title="Skipped">t</th>
-            <th class="px-3 py-3 text-right  text-[11px] font-medium uppercase tracking-wider text-slate-500" title="Total trips">T</th>
-            <th class="px-3 py-3 text-right  text-[11px] font-medium uppercase tracking-wider text-slate-500" title="Pings">Obs.</th>
-            <th class="px-3 py-3 text-left   text-[11px] font-medium uppercase tracking-wider text-slate-500">Trip Completion Penalties</th>
-            <th class="px-3 py-3 text-right  text-[11px] font-medium uppercase tracking-wider text-slate-500">Punctuality Penalties</th>
-            <th class="px-3 py-3 text-right  text-[11px] font-medium uppercase tracking-wider text-slate-500">Other Penalties</th>
+            <th class="px-3 py-2.5 text-left   text-[11px] font-medium uppercase tracking-wider text-slate-500">#</th>
+            <th class="px-3 py-2.5 text-left   text-[11px] font-medium uppercase tracking-wider text-slate-500">Block</th>
+
+            <th class="border-l border-slate-800 px-3 py-2.5 text-right text-[11px] font-medium uppercase tracking-wider text-slate-500" title="Sum of trip durations">Duration</th>
+            <th class="px-3 py-2.5 text-right  text-[11px] font-medium uppercase tracking-wider text-slate-500" title="Route distance including inter-trip segments">Distance</th>
+            <th class="px-3 py-2.5 text-right  text-[11px] font-medium uppercase tracking-wider text-slate-500" title="Number of scheduled trips">Trips</th>
+
+            <th class="border-l border-slate-800 px-3 py-2.5 text-right text-[11px] font-medium uppercase tracking-wider text-slate-500" title="Block span from first matched stop of first trip to last matched stop of last trip">Duration</th>
+            <th class="px-3 py-2.5 text-right  text-[11px] font-medium uppercase tracking-wider text-slate-500" title="Distance based on visited stop segments">Distance</th>
+            <th class="px-3 py-2.5 text-right  text-[11px] font-medium uppercase tracking-wider text-slate-500" title="Trips with at least one matched stop">Trips</th>
+            <th class="px-3 py-2.5 text-right  text-[11px] font-medium uppercase tracking-wider text-slate-500">SDI</th>
+
+            <th class="border-l border-slate-800 px-3 py-2.5 text-right text-[11px] font-medium uppercase tracking-wider text-slate-500" title="Trip punctuality penalties">Punct.</th>
+            <th class="px-3 py-2.5 text-right  text-[11px] font-medium uppercase tracking-wider text-slate-500" title="Trip completion penalties">Completion</th>
+            <th class="px-3 py-2.5 text-right  text-[11px] font-medium uppercase tracking-wider text-slate-500" title="Data availability penalties">Data Avail.</th>
+            <th class="px-3 py-2.5 text-right  text-[11px] font-medium uppercase tracking-wider text-slate-500">Total</th>
           </tr>
         </thead>
         <tbody>
           {#each rankedBlocks as row, i (row.blockId)}
             <tr class="border-b border-slate-800/60 transition-colors hover:bg-slate-800/30">
-              <td class="px-3 py-2.5 text-xs text-slate-600">{row.sdi !== null ? i + 1 : '—'}</td>
+              <td class="px-3 py-2.5 text-xs text-slate-600">{i + 1}</td>
               <td class="px-3 py-2.5 font-mono text-xs font-medium text-slate-300">{row.blockId}</td>
 
-              <td class="px-3 py-2.5 text-right">
-                {#if row.sdi !== null}
-                  <span class="font-mono text-xs font-semibold {sdiClass(row.sdi)}">{row.sdi.toFixed(4)}</span>
-                {:else}
-                  <span class="text-xs text-slate-600">—</span>
-                {/if}
+              <!-- Scheduled -->
+              <td class="border-l border-slate-800/40 px-3 py-2.5 text-right font-mono text-xs text-slate-400">
+                {fmtDuration(row.schedDurationMin)}
               </td>
-              <td class="px-3 py-2.5 text-right font-mono text-xs text-slate-400">{row.hasLive ? row.A.toFixed(2) : '—'}</td>
-              <td class="px-3 py-2.5 text-right font-mono text-xs text-slate-400">{row.L}</td>
-              <td class="px-3 py-2.5 text-right font-mono text-xs {row.hasLive && row.t > 0 ? 'text-red-400' : 'text-slate-400'}">{row.hasLive ? row.t : '—'}</td>
-              <td class="px-3 py-2.5 text-right font-mono text-xs text-slate-400">{row.T}</td>
-              <td class="px-3 py-2.5 text-right font-mono text-xs text-slate-600">{row.observations || '—'}</td>
-
-              <!-- Trip Completion Penalties -->
-              <td class="px-3 py-2.5 font-mono text-xs {row.tcSummary.totalPenaltyTrips > 0 ? 'text-orange-400' : 'text-slate-600'}">
-                {#if !row.hasLive}
-                  <span class="text-slate-600">No data</span>
-                {:else}
-                  {tierSummary(row.tcSummary)}
-                {/if}
+              <td class="px-3 py-2.5 text-right font-mono text-xs text-slate-400">
+                {fmtDist(row.schedDistKm)}
+              </td>
+              <td class="px-3 py-2.5 text-right font-mono text-xs text-slate-400">
+                {row.schedTrips}
               </td>
 
-              <!-- Punctuality Penalties -->
-              <td class="px-3 py-2.5 text-right font-mono text-xs {netPctClass(row.punctNetPct)}">
-                {row.hasLive ? fmtNetPct(row.punctNetPct) : '—'}
+              <!-- Observed -->
+              <td class="border-l border-slate-800/40 px-3 py-2.5 text-right font-mono text-xs {row.hasLive ? 'text-slate-300' : 'text-slate-600'}">
+                {row.hasLive ? fmtDuration(row.obsDurationMin) : '—'}
               </td>
+              <td class="px-3 py-2.5 text-right font-mono text-xs {row.hasLive ? 'text-slate-300' : 'text-slate-600'}">
+                {row.hasLive ? fmtDist(row.obsDistKm) : '—'}
+              </td>
+              <td class="px-3 py-2.5 text-right font-mono text-xs {row.hasLive ? (row.obsTrips < row.schedTrips ? 'text-orange-400' : 'text-slate-300') : 'text-slate-600'}">
+                {row.hasLive ? `${row.obsTrips} / ${row.schedTrips}` : '—'}
+              </td>
+              <td class="px-3 py-2.5 text-right font-mono text-xs text-slate-600">—</td>
 
-              <!-- Other Penalties (data availability) -->
-              <td class="px-3 py-2.5 text-right font-mono text-xs {row.dataPenPct > 0 ? 'text-red-400' : 'text-slate-600'}">
-                {row.hasLive ? (row.dataPenPct > 0 ? `−${row.dataPenPct}%` : '—') : '—'}
-              </td>
+              <!-- Penalties -->
+              <td class="border-l border-slate-800/40 px-3 py-2.5 text-right font-mono text-xs text-slate-600">—</td>
+              <td class="px-3 py-2.5 text-right font-mono text-xs text-slate-600">—</td>
+              <td class="px-3 py-2.5 text-right font-mono text-xs text-slate-600">—</td>
+              <td class="px-3 py-2.5 text-right font-mono text-xs text-slate-600">—</td>
             </tr>
           {/each}
         </tbody>
       </table>
     </div>
 
-    <div class="flex flex-wrap gap-x-6 gap-y-1 text-[11px] text-slate-600">
-      <span>TC Penalties: N×tier = penalised trips · e.g. 1×&lt;25 = one trip &lt;25% complete → 100% deduction</span>
-      <span>Punct. / Other: % of monthly fee · green = incentive</span>
-      <span>Ranked best → worst by SDI. Lower SDI = better adherence.</span>
-    </div>
+    <p class="text-[11px] text-slate-600">
+      Observed values derived from stop match ping times and served stop segments. Penalty columns to be implemented.
+    </p>
   {/if}
 </div>

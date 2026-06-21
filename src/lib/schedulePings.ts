@@ -153,6 +153,15 @@ function buildStopScheduleMap(
   return map;
 }
 
+// ── Logging helpers ───────────────────────────────────────────────────────────
+
+function fmtMin(t: number): string {
+  const h = Math.floor(t / 60);
+  const m = Math.floor(t % 60);
+  const s = Math.round((t % 1) * 60);
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
 // ── Journey builder ───────────────────────────────────────────────────────────
 
 interface JourneyStop {
@@ -170,6 +179,7 @@ interface JourneyStop {
 function buildJourney(
   pings:        PingWithTime[],
   allStopInfos: StopInfo[][],
+  blockId?:     string,
 ): JourneyStop[] {
   const stopById = new Map<string, StopInfo>();
   for (const infos of allStopInfos)
@@ -197,6 +207,14 @@ function buildJourney(
       lastStopId = nearestId;
     }
   }
+
+  const pfx = blockId ? `[block:${blockId}]` : '[block]';
+  console.groupCollapsed(`${pfx} journey — ${journey.length} entries from ${pings.length} relevant pings`);
+  journey.forEach((j, i) =>
+    console.log(`  [${i}] stopId=${j.stopId} t=${fmtMin(j.pingT)} dist=${j.distKm.toFixed(3)}km`),
+  );
+  console.groupEnd();
+
   return journey;
 }
 
@@ -220,12 +238,14 @@ function matchJourneyToTrips(
   sortedTripIds: string[],
   allStopInfos:  StopInfo[][],
   allPings:      PingWithTime[],
+  blockId?:      string,
 ): TripRecord[] {
   const stopSchedules = buildStopScheduleMap(allStopInfos);
+  const pfx = blockId ? `[block:${blockId}]` : '[block]';
 
   // For each journey entry, pre-compute which trip has the closest scheduled
   // time for that stop. Ties broken by trip index (earlier trip wins).
-  const preferred: number[] = journey.map(visit => {
+  const preferred: number[] = journey.map((visit, k) => {
     const schedules = stopSchedules.get(visit.stopId) ?? [];
     let bestTripIdx = -1;
     let bestDist    = Infinity;
@@ -233,6 +253,11 @@ function matchJourneyToTrips(
       const d = Math.abs(visit.pingT - s.schedMin);
       if (d < bestDist) { bestDist = d; bestTripIdx = s.tripIdx; }
     }
+    console.log(
+      `${pfx} journey[${k}] stopId=${visit.stopId} t=${fmtMin(visit.pingT)}` +
+      ` → preferred trip[${bestTripIdx}]=${sortedTripIds[bestTripIdx] ?? '—'}` +
+      ` (dev=${bestDist.toFixed(1)}min)`,
+    );
     return bestTripIdx;
   });
 
@@ -249,6 +274,8 @@ function matchJourneyToTrips(
         claimed[k] = 1;
         cursor     = k + 1;
         const v    = journey[k];
+        console.log(`${pfx} trip[${tripIdx}]=${tid} stop[${j}]=${info.stopId} ← MATCH FOUND`);
+        console.log(`pos ${v.ping}, time ${v.pingT}, deviation ${v.pingT - info.schedMin}`)
         return {
           stopIndex: j, stopId: info.stopId, stopName: info.stopName,
           schedMin: info.schedMin, cumDistKm: info.cumDist,
@@ -256,6 +283,8 @@ function matchJourneyToTrips(
           devMin: v.pingT - info.schedMin, visited: true,
         };
       }
+      console.log(`${pfx} trip[${tripIdx}]=${tid} stop[${j}]=${info.stopId} ← NO MATCH`);
+
       return emptyMatch(info, j);
     });
 
@@ -263,6 +292,16 @@ function matchJourneyToTrips(
     const pings   = visited.length >= 2
       ? getPingsInWindow(visited[0].matchedPingT!, visited.at(-1)!.matchedPingT!, allPings)
       : visited.length === 1 ? [visited[0].matchedPing!] : [];
+
+    console.log(
+      `${pfx} trip[${tripIdx}]=${tid}` +
+      ` visited=${visited.length}/${stopMatches.length} stops` +
+      (visited.length > 0
+        ? ` window=[${fmtMin(visited[0].matchedPingT!)}–${fmtMin(visited.at(-1)!.matchedPingT!)}]`
+        : ' window=empty') +
+      ` pings=${pings.length}`,
+    );
+
     return { tid, stopMatches, pings };
   });
 }
@@ -290,9 +329,14 @@ export function matchBlockPings(
   const blockStartMin = allStopInfos[0]?.[0]?.schedMin ?? 0;
   const relevant      = sortedVehiclePings.filter(pw => pw.t >= blockStartMin - BLOCK_PRE_SLACK_MIN);
 
-  const journey = buildJourney(relevant, allStopInfos);
+  const blockId = sortedTripIds[0] ? `trips:${sortedTripIds.length}` : 'unknown';
+  console.group(`[matchBlockPings] block ${blockId} — ${n} trips, ${relevant.length} relevant pings`);
+
+  const journey = buildJourney(relevant, allStopInfos, blockId);
 
   if (journey.length === 0) {
+    console.warn(`[block:${blockId}] journey is empty — no pings landed within ${SEQ_STOP_KM * 1000}m of any stop`);
+    console.groupEnd();
     return {
       tripRecords:  sortedTripIds.map((tid, i) => ({
         tid,
@@ -304,9 +348,9 @@ export function matchBlockPings(
     };
   }
 
-  const tripRecords = matchJourneyToTrips(journey, sortedTripIds, allStopInfos, relevant);
-  return {
-    tripRecords,
-    skippedCount: tripRecords.filter(r => !r.stopMatches.some(m => m.visited)).length,
-  };
+  const tripRecords = matchJourneyToTrips(journey, sortedTripIds, allStopInfos, relevant, blockId);
+  const skippedCount = tripRecords.filter(r => !r.stopMatches.some(m => m.visited)).length;
+  console.log(`[block:${blockId}] done — skipped=${skippedCount}/${n} trips`);
+  console.groupEnd();
+  return { tripRecords, skippedCount };
 }

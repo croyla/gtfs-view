@@ -114,9 +114,12 @@ export function computeTripCompletionFromStopMatches(
   const anyVisited  = stopMatches.some(s => s.visited);
 
   let servedKm = 0;
+  const segments: Array<{ from: string; to: string; km: number; counted: boolean }> = [];
   for (let i = 1; i < stopMatches.length; i++) {
-    if (stopMatches[i - 1].visited && stopMatches[i].visited)
-      servedKm += stopMatches[i].cumDistKm - stopMatches[i - 1].cumDistKm;
+    const segKm   = stopMatches[i].cumDistKm - stopMatches[i - 1].cumDistKm;
+    const counted = stopMatches[i - 1].visited && stopMatches[i].visited;
+    if (counted) servedKm += segKm;
+    segments.push({ from: stopMatches[i - 1].stopId, to: stopMatches[i].stopId, km: segKm, counted });
   }
 
   const completionPct = scheduledKm > 0 ? Math.min(100, servedKm / scheduledKm * 100) : 0;
@@ -132,6 +135,26 @@ export function computeTripCompletionFromStopMatches(
 
   const firstStopRaw = sts.length > 0 ? gtfsData.stops.get(sts[0].stop_id)      : undefined;
   const lastStopRaw  = sts.length > 0 ? gtfsData.stops.get(sts.at(-1)!.stop_id) : undefined;
+
+  // ── verbose logging ──
+  console.groupCollapsed(
+    `[completion] ${tid} — ${tier} ${completionPct.toFixed(1)}% (${servedKm.toFixed(2)}/${scheduledKm.toFixed(2)} km) penalty=${penaltyPct}%`,
+  );
+  console.log(`  anyVisited=${anyVisited}  scheduledKm=${scheduledKm.toFixed(3)}  servedKm=${servedKm.toFixed(3)}  lostKm=${lostKm.toFixed(3)}`);
+  console.log('  stop matches:');
+  stopMatches.forEach((m, i) => {
+    const pingInfo = m.visited
+      ? `t=${m.matchedPingT?.toFixed(1)} dev=${m.devMin?.toFixed(1)}min`
+      : 'NO MATCH';
+    console.log(`    [${i}] ${m.stopId} "${m.stopName}" sched=${m.schedMin.toFixed(1)} cumDist=${m.cumDistKm.toFixed(3)}km visited=${m.visited} ${pingInfo}`);
+  });
+  if (segments.length > 0) {
+    console.log('  segments:');
+    segments.forEach(s =>
+      console.log(`    ${s.from}→${s.to} ${s.km.toFixed(3)}km counted=${s.counted}`),
+    );
+  }
+  console.groupEnd();
 
   return {
     tid, completionPct, scheduledKm, lostKm, penaltyPct, tier,
@@ -161,6 +184,11 @@ export function computePunctualityFromCompletions(
     const arrivalDevMin = c.stopMatches.at(-1)?.devMin ?? null;
     const startOnTime   = c.startPing ? Math.abs(startDevMin!)   <= settings.startThresholdMin : null;
     const endOnTime     = c.endPing   ? Math.abs(arrivalDevMin!) <= settings.endThresholdMin   : null;
+    console.log(
+      `[punctuality] ${c.tid}` +
+      `  startDev=${startDevMin?.toFixed(1) ?? 'null'}min (onTime=${startOnTime ?? 'no-data'}, threshold±${settings.startThresholdMin}min)` +
+      `  endDev=${arrivalDevMin?.toFixed(1) ?? 'null'}min (onTime=${endOnTime ?? 'no-data'}, threshold±${settings.endThresholdMin}min)`,
+    );
     return { tid: c.tid, durationMin, startDevMin, arrivalDevMin, startOnTime, endOnTime };
   });
 
@@ -172,6 +200,13 @@ export function computePunctualityFromCompletions(
   const endNoDataCount   = trips.filter(t => t.endOnTime === null).length;
   const startPenaltyPct  = startLateCount * settings.startPenaltyPct;
   const endPenaltyPct    = endLateCount   * settings.endPenaltyPct;
+
+  console.log(
+    `[punctuality] summary` +
+    `  start: onTime=${startOnTimeCount} late=${startLateCount} noData=${startNoDataCount} penalty=${startPenaltyPct}%` +
+    `  end: onTime=${endOnTimeCount} late=${endLateCount} noData=${endNoDataCount} penalty=${endPenaltyPct}%` +
+    `  total=${startPenaltyPct + endPenaltyPct}%`,
+  );
 
   return {
     trips, startOnTimeCount, startLateCount, startNoDataCount,
@@ -229,12 +264,32 @@ export function computeBlockMetrics(
   const { tripRecords, skippedCount } = pingData;
   const sortedTripIds = tripRecords.map(r => r.tid);
 
+  console.group(`[computeBlockMetrics] ${sortedTripIds.length} trips, skipped=${skippedCount}`);
+
   const completions = tripRecords.map(r =>
     computeTripCompletionFromStopMatches(r.tid, r.stopMatches, gtfsData),
+  );
+
+  console.log('[computeBlockMetrics] completion summary:');
+  completions.forEach(c =>
+    console.log(
+      `  ${c.tid}  tier=${c.tier}  ${c.completionPct.toFixed(1)}%` +
+      `  served=${(c.scheduledKm - c.lostKm).toFixed(2)}/${c.scheduledKm.toFixed(2)}km` +
+      `  penalty=${c.penaltyPct}%`,
+    ),
   );
 
   const punctuality      = computePunctualityFromCompletions(completions, DEFAULT_PUNCT_SETTINGS, gtfsData);
   const dataAvailability = computeDataAvailability(sortedTripIds, taggedPings, gtfsData);
 
+  console.log('[computeBlockMetrics] data availability:');
+  dataAvailability.trips.forEach(t =>
+    console.log(
+      `  ${t.tid}  pings=${t.pingCount}/${t.expectedPings} (${t.availabilityPct.toFixed(1)}%)` +
+      `  penalized=${t.penalized}`,
+    ),
+  );
+
+  console.groupEnd();
   return { tripRecords, completions, punctuality, dataAvailability, skippedCount };
 }

@@ -1,5 +1,5 @@
 import type { SerializedGtfsData } from './gtfsCore';
-import type { GtfsData, StopTime } from './types';
+import type { GtfsData, StopTime } from '../../types/types';
 
 // ── Deserialiser: runs on main thread after Worker posts result ───────────────
 

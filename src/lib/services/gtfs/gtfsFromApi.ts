@@ -1,5 +1,5 @@
-import type { ApiAgency, ApiRoute, ApiStop, ApiTrip, ApiStopTime } from './api';
-import type { Agency, Route, Stop, StopTime, Trip, ShapePoint, GtfsData } from './types';
+import type { ApiAgency, ApiRoute, ApiStop, ApiTrip, ApiStopTime } from '../api';
+import type { Agency, Route, Stop, StopTime, Trip, ShapePoint, GtfsData } from '../../types/types';
 import { buildTree } from './gtfsCore';
 
 export function buildGtfsFromApi(

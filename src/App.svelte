@@ -4,21 +4,21 @@
     authenticate, fetchDates, fetchGtfsBundle, fetchPositions, openPositionStream,
     getToken, clearToken,
     type ApiVehicleAssignment, type ApiPosition, type WsMessage,
-  } from './lib/api';
-  import { buildGtfsFromApi } from './lib/gtfsFromApi';
-  import { buildLiveStopTimes, applyInterpolation } from './lib/liveStopTimes';
-  import { parseTimeMin } from './lib/popupUtils';
-  import { getCachedBundle, setCachedBundle, getCachedPositions, setCachedPositions } from './lib/idb';
-  import type { GtfsData } from './lib/types';
-  import type { LiveData, VehiclePosition } from './lib/liveTypes';
-  import type { BlockPingData } from './lib/schedulePings';
-  import { pingCacheGet } from './lib/pingDataCache';
-  import MapView from './lib/Map.svelte';
-  import Sidebar from './lib/Sidebar.svelte';
-  import Dashboard from './lib/Dashboard.svelte';
-  import DatePicker from './lib/DatePicker.svelte';
-  import Popup from './lib/Popup.svelte';
-  import type { CardEntry } from './lib/popupTypes';
+  } from './lib/services/api';
+  import { buildGtfsFromApi } from './lib/services/gtfs/gtfsFromApi';
+  import { buildLiveStopTimes, applyInterpolation } from './lib/services/live/liveStopTimes';
+  import { parseTimeMin } from './lib/services/popupUtils';
+  import { getCachedBundle, setCachedBundle, getCachedPositions, setCachedPositions } from './lib/stores/idb';
+  import type { GtfsData } from './lib/types/types';
+  import type { LiveData, VehiclePosition } from './lib/types/liveTypes';
+  import type { BlockPingData } from './lib/services/schedule/schedulePings';
+  import { pingCacheGet } from './lib/stores/pingDataCache';
+  import MapView from './lib/components/Map.svelte';
+  import Sidebar from './lib/components/Sidebar.svelte';
+  import Dashboard from './lib/components/Dashboard.svelte';
+  import DatePicker from './lib/components/DatePicker.svelte';
+  import Popup from './lib/components/Popup.svelte';
+  import type { CardEntry } from './lib/types/popupTypes';
 
   // ── App screen ────────────────────────────────────────────────────────────────
 
@@ -367,7 +367,7 @@
     const result = new Map<string, BlockPingData>();
     for (const bid of bids) {
       const cached = pingCacheGet(bid, date);
-      if (cached) result.set(bid, cached);
+      if (cached) result.set(bid, cached.pingData);
     }
     blockPingDataMap = result;
   });

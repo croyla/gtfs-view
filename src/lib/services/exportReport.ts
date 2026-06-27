@@ -1,6 +1,6 @@
 import { haversineKm, parseTimeMin } from './popupUtils';
-import type { GtfsData } from './types';
-import type { LiveProcessed } from './liveStopTimes';
+import type { GtfsData } from '../types/types';
+import type { LiveProcessed } from './live/liveStopTimes';
 
 export type ExportScope =
   | { kind: 'all' }

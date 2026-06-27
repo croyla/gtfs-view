@@ -4,8 +4,8 @@
   import type { FilterSpecification } from 'maplibre-gl';
   import { Protocol } from 'pmtiles';
   import type { Feature, FeatureCollection, LineString, Point } from 'geojson';
-  import type { GtfsData, ShapePoint } from './types';
-  import type { VehiclePosition } from './liveTypes';
+  import type { GtfsData, ShapePoint } from '../types/types';
+  import type { VehiclePosition } from '../types/liveTypes';
 
   let {
     gtfsData     = null,

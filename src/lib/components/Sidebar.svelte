@@ -1,8 +1,8 @@
 <script lang="ts">
-  import type { GtfsData, RouteTreeNode, AgencyTreeNode } from './types';
-  import type { LiveData } from './liveTypes';
-  import type { LiveProcessed } from './liveStopTimes';
-  import type { BlockPingData } from './schedulePings';
+  import type { GtfsData, RouteTreeNode, AgencyTreeNode } from '../types/types';
+  import type { LiveData } from '../types/liveTypes';
+  import type { LiveProcessed } from '../services/live/liveStopTimes';
+  import type { BlockPingData } from '../services/schedule/schedulePings';
 
   const TRIP_PALETTE = ['#818cf8','#34d399','#fb923c','#f472b6','#38bdf8','#a78bfa','#4ade80','#facc15','#f87171','#2dd4bf'];
 

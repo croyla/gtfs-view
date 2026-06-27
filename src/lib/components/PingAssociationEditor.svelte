@@ -1,8 +1,8 @@
 <script lang="ts">
-  import type { GtfsData } from './types';
-  import type { VehiclePosition } from './liveTypes';
-  import type { TripCompletionResult } from './scheduleMetrics';
-  import { haversineKm, parseTimeMin } from './popupUtils';
+  import type { GtfsData } from '../types/types';
+  import type { VehiclePosition } from '../types/liveTypes';
+  import type { TripCompletionResult } from '../services/schedule/scheduleMetrics';
+  import { haversineKm, parseTimeMin } from '../services/popupUtils';
 
   let {
     sortedTripIds,

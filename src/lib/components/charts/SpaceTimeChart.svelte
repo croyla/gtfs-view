@@ -2,10 +2,10 @@
   import { onDestroy, untrack } from 'svelte';
   import Chart from 'chart.js/auto';
   import type { Scale, ChartConfiguration } from 'chart.js';
-  import type { GtfsData } from '../types';
-  import type { VehiclePosition } from '../liveTypes';
-  import type { BlockPingData } from '../schedulePings';
-  import { haversineKm, parseTimeMin } from '../popupUtils';
+  import type { GtfsData } from '../../types/types';
+  import type { VehiclePosition } from '../../types/liveTypes';
+  import type { BlockPingData } from '../../services/schedule/schedulePings';
+  import { haversineKm, parseTimeMin } from '../../services/popupUtils';
 
   let {
     blockTripIds = [],

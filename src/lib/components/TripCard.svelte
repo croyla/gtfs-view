@@ -1,9 +1,9 @@
 <script lang="ts">
-  import type { GtfsData } from './types';
-  import type { CardEntry } from './popupTypes';
-  import type { LiveProcessed, LiveStopTime } from './liveStopTimes';
-  import { computeMetrics } from './liveStopTimes';
-  import { formatTime } from './popupUtils';
+  import type { GtfsData } from '../types/types';
+  import type { CardEntry } from '../types/popupTypes';
+  import type { LiveProcessed, LiveStopTime } from '../services/live/liveStopTimes';
+  import { computeMetrics } from '../services/live/liveStopTimes';
+  import { formatTime } from '../services/popupUtils';
 
   let {
     tripId,

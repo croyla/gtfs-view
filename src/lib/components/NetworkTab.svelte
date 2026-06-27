@@ -1,10 +1,10 @@
 <script lang="ts">
-  import type { GtfsData } from './types';
-  import type { LiveData } from './liveTypes';
-  import type { ApiVehicleAssignment } from './api';
-  import { haversineKm, parseTimeMin } from './popupUtils';
-  import { makeEpochToMin, buildSortedPings, matchBlockPings } from './schedulePings';
-  import { pingCacheGet, pingCacheSet } from './pingDataCache';
+  import type { GtfsData } from '../types/types';
+  import type { LiveData } from '../types/liveTypes';
+  import type { ApiVehicleAssignment } from '../services/api';
+  import { haversineKm, parseTimeMin } from '../services/popupUtils';
+  import { makeEpochToMin, buildSortedPings, matchBlockPings } from '../services/schedule/schedulePings';
+  import { pingCacheGet } from '../stores/pingDataCache';
 
   let {
     gtfsData,
@@ -99,11 +99,8 @@
 
     if (hasLive) {
       const sortedVehiclePings = buildSortedPings(rawVehiclePings, epochToMin);
-      const pingData = pingCacheGet(blockId, date) ?? (() => {
-        const pd = matchBlockPings(sorted, sortedVehiclePings, gtfsData);
-        pingCacheSet(blockId, date, pd);
-        return pd;
-      })();
+      const pingData = pingCacheGet(blockId, date)?.pingData
+        ?? matchBlockPings(sorted, sortedVehiclePings, gtfsData);
 
       for (const record of pingData.tripRecords) {
         const visited = record.stopMatches.filter(m => m.visited);

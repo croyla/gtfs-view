@@ -1,6 +1,6 @@
 import initSqlJs from 'sql.js';
 import type { SqlJsStatic, SqlValue } from 'sql.js';
-import type { LiveData, VehiclePosition } from './liveTypes';
+import type { LiveData, VehiclePosition } from '../../types/liveTypes';
 
 let SQL: SqlJsStatic | null = null;
 

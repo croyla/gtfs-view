@@ -1,4 +1,17 @@
-import type { ShapePoint } from './types';
+import type { ShapePoint } from '../types/types';
+
+export function localMidnightEpoch(dateStr: string, timezone: string): number {
+  if (dateStr.length !== 8) return 0;
+  const y = dateStr.slice(0, 4), mo = dateStr.slice(4, 6), d = dateStr.slice(6, 8);
+  const noonUtcMs = Date.parse(`${y}-${mo}-${d}T12:00:00Z`);
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  }).formatToParts(new Date(noonUtcMs));
+  const h  = parseInt(parts.find(p => p.type === 'hour')?.value   ?? '12');
+  const mi = parseInt(parts.find(p => p.type === 'minute')?.value ?? '0');
+  const s  = parseInt(parts.find(p => p.type === 'second')?.value ?? '0');
+  return (noonUtcMs - (h * 3600 + mi * 60 + s) * 1000) / 1000;
+}
 
 export function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 6371;

@@ -1,8 +1,8 @@
 <script lang="ts">
-  import type { GtfsData } from './types';
-  import type { CardEntry } from './popupTypes';
-  import type { LiveProcessed } from './liveStopTimes';
-  import type { ExportScope } from './exportReport';
+  import type { GtfsData } from '../types/types';
+  import type { CardEntry } from '../types/popupTypes';
+  import type { LiveProcessed } from '../services/live/liveStopTimes';
+  import type { ExportScope } from '../services/exportReport';
   import StopCard from './StopCard.svelte';
   import RouteCard from './RouteCard.svelte';
   import TripCard from './TripCard.svelte';

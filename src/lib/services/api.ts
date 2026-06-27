@@ -134,6 +134,15 @@ export async function fetchPositions(date: string): Promise<ApiPosition[]> {
   return apiFetch<ApiPosition[]>(`/v1/${date}/positions`);
 }
 
+export async function fetchVehiclePositions(date: string, vehicleId: string): Promise<ApiPosition[]> {
+  try {
+    return await apiFetch<ApiPosition[]>(`/v1/${date}/positions/${vehicleId}`);
+  } catch (err) {
+    if (err instanceof Error && err.message === 'HTTP 404') return [];
+    throw err;
+  }
+}
+
 export function openPositionStream(date: string): WebSocket {
   if (!_token) throw new Error('Not authenticated');
   const wsBase = BASE_URL.replace(/^http/, 'ws');

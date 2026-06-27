@@ -1,6 +1,6 @@
-import type { GtfsData } from './types';
-import type { VehiclePosition } from './liveTypes';
-import { haversineKm, parseTimeMin } from './popupUtils';
+import type { GtfsData } from '../../types/types';
+import type { VehiclePosition } from '../../types/liveTypes';
+import { haversineKm, parseTimeMin } from '../popupUtils';
 import type { PingWithTime, StopMatch, TripRecord, BlockPingData } from './schedulePings';
 
 // Re-export ping-side types and utilities so existing callers keep working.

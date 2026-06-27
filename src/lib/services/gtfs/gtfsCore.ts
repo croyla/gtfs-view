@@ -2,7 +2,7 @@ import { unzipSync, strFromU8 } from 'fflate';
 import type {
   Agency, AgencyTreeNode, Route, RouteTreeNode,
   ShapeGroup, ShapePoint, Stop, StopTime, Trip,
-} from './types';
+} from '../../types/types';
 
 // ── Serialized shape (Worker → main thread, no Maps/Sets) ─────────────────────
 

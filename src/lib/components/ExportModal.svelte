@@ -1,7 +1,7 @@
 <script lang="ts">
-  import type { GtfsData } from './types';
-  import type { LiveProcessed } from './liveStopTimes';
-  import type { ExportScope, ReportType } from './exportReport';
+  import type { GtfsData } from '../types/types';
+  import type { LiveProcessed } from '../services/live/liveStopTimes';
+  import type { ExportScope, ReportType } from '../services/exportReport';
   import {
     scopeLabel,
     computeTripCompletion,
@@ -9,7 +9,7 @@
     computePunctuality,
     downloadJson,
     openHtmlOrPdf,
-  } from './exportReport';
+  } from '../services/exportReport';
 
   let {
     scope,

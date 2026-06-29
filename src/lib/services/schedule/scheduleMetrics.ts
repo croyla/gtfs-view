@@ -44,12 +44,13 @@ export const DEFAULT_PUNCT_SETTINGS: PunctualitySettings = {
 };
 
 export interface TripPunctualityDetail {
-  tid:           string;
-  durationMin:   number;
-  startDevMin:   number | null;
-  arrivalDevMin: number | null;
-  startOnTime:   boolean | null;
-  endOnTime:     boolean | null;
+  tid:            string;
+  durationMin:    number;
+  startDevMin:    number | null;
+  arrivalDevMin:  number | null;
+  startOnTime:    boolean | null;
+  endOnTime:      boolean | null;
+  tripCarriedOut: boolean;  // true if ≥1 stop was visited
 }
 
 export interface PunctualityMetrics {
@@ -64,6 +65,57 @@ export interface PunctualityMetrics {
   endPenaltyPct:    number;
   totalNetPct:      number;
   settings:         PunctualitySettings;
+}
+
+// ── Block-level punctuality penalty ───────────────────────────────────────────
+
+// Threshold: % of trips that must be on time before penalties apply.
+export const PUNCT_START_THRESHOLD_PCT = 90;
+export const PUNCT_END_THRESHOLD_PCT   = 80;
+
+export interface BlockPunctualityPenalty {
+  totalTrips:       number;
+  onTimeStartCount: number;
+  onTimeEndCount:   number;
+  onTimeStartPct:   number;   // % of all trips with on-time start
+  onTimeEndPct:     number;
+  startPenaltyPct:  number;   // max(0, (threshold - actual) * 2)
+  endPenaltyPct:    number;
+  totalPenaltyPct:  number;
+}
+
+/**
+ * Compute block-level punctuality penalty from aggregated punctuality metrics.
+ *
+ * Only trips that were actually carried out (≥1 visited stop) are included.
+ * Trips with no pings at all are excluded — no trip run, no penalty.
+ * Trips that ran but lack data for the start/end stop count as NOT on time.
+ *
+ * Formula (run independently for start and end):
+ *   y = onTimeCount / carriedOutTrips * 100
+ *   d = max(0, threshold − y)
+ *   penalty = d × 2
+ */
+export function computeBlockPunctualityPenalty(
+  punct: PunctualityMetrics,
+): BlockPunctualityPenalty {
+  const carried          = punct.trips.filter(t => t.tripCarriedOut);
+  const totalTrips       = carried.length;
+  const onTimeStartCount = carried.filter(t => t.startOnTime === true).length;
+  const onTimeEndCount   = carried.filter(t => t.endOnTime   === true).length;
+
+  const onTimeStartPct = totalTrips > 0 ? onTimeStartCount / totalTrips * 100 : 100;
+  const onTimeEndPct   = totalTrips > 0 ? onTimeEndCount   / totalTrips * 100 : 100;
+  
+  const startPenaltyPct = Math.max(0, PUNCT_START_THRESHOLD_PCT - onTimeStartPct) * 0.2;
+  const endPenaltyPct   = Math.max(0, PUNCT_END_THRESHOLD_PCT   - onTimeEndPct)   * 0.2;
+
+  return {
+    totalTrips, onTimeStartCount, onTimeEndCount,
+    onTimeStartPct, onTimeEndPct,
+    startPenaltyPct, endPenaltyPct,
+    totalPenaltyPct: startPenaltyPct + endPenaltyPct,
+  };
 }
 
 // ── Data availability types ────────────────────────────────────────────────────
@@ -89,11 +141,12 @@ export interface DataAvailabilityMetrics {
 // ── Block output ───────────────────────────────────────────────────────────────
 
 export interface BlockMetrics {
-  tripRecords:      TripRecord[];
-  completions:      TripCompletionResult[];
-  punctuality:      PunctualityMetrics;
-  dataAvailability: DataAvailabilityMetrics;
-  skippedCount:     number;
+  tripRecords:        TripRecord[];
+  completions:        TripCompletionResult[];
+  punctuality:        PunctualityMetrics;
+  blockPunctPenalty:  BlockPunctualityPenalty;
+  dataAvailability:   DataAvailabilityMetrics;
+  skippedCount:       number;
 }
 
 // ── Completion scoring ─────────────────────────────────────────────────────────
@@ -182,14 +235,16 @@ export function computePunctualityFromCompletions(
     const durationMin = Math.max(1, schedEnd - schedStart);
     const startDevMin   = c.stopMatches[0]?.devMin    ?? null;
     const arrivalDevMin = c.stopMatches.at(-1)?.devMin ?? null;
-    const startOnTime   = c.startPing ? Math.abs(startDevMin!)   <= settings.startThresholdMin : null;
-    const endOnTime     = c.endPing   ? Math.abs(arrivalDevMin!) <= settings.endThresholdMin   : null;
+    const tripCarriedOut = c.stopMatches.some(s => s.visited);
+    const startOnTime    = c.startPing ? Math.abs(startDevMin!)   <= settings.startThresholdMin : null;
+    const endOnTime      = c.endPing   ? Math.abs(arrivalDevMin!) <= settings.endThresholdMin   : null;
     console.log(
       `[punctuality] ${c.tid}` +
+      `  carriedOut=${tripCarriedOut}` +
       `  startDev=${startDevMin?.toFixed(1) ?? 'null'}min (onTime=${startOnTime ?? 'no-data'}, threshold±${settings.startThresholdMin}min)` +
       `  endDev=${arrivalDevMin?.toFixed(1) ?? 'null'}min (onTime=${endOnTime ?? 'no-data'}, threshold±${settings.endThresholdMin}min)`,
     );
-    return { tid: c.tid, durationMin, startDevMin, arrivalDevMin, startOnTime, endOnTime };
+    return { tid: c.tid, durationMin, startDevMin, arrivalDevMin, startOnTime, endOnTime, tripCarriedOut };
   });
 
   const startOnTimeCount = trips.filter(t => t.startOnTime === true).length;
@@ -280,6 +335,7 @@ export function computeBlockMetrics(
   );
 
   const punctuality      = computePunctualityFromCompletions(completions, DEFAULT_PUNCT_SETTINGS, gtfsData);
+  const blockPunctPenalty = computeBlockPunctualityPenalty(punctuality);
   const dataAvailability = computeDataAvailability(sortedTripIds, taggedPings, gtfsData);
 
   console.log('[computeBlockMetrics] data availability:');
@@ -291,5 +347,5 @@ export function computeBlockMetrics(
   );
 
   console.groupEnd();
-  return { tripRecords, completions, punctuality, dataAvailability, skippedCount };
+  return { tripRecords, completions, punctuality, blockPunctPenalty, dataAvailability, skippedCount };
 }

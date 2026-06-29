@@ -33,7 +33,8 @@
   import type { BlockMetrics } from '../services/schedule/scheduleMetrics';
   import { parseTimeMin, localMidnightEpoch } from '../services/popupUtils';
   import { pingCacheGet, pingCacheSet } from '../stores/pingDataCache';
-  import TripMapPopup from './TripMapPopup.svelte';
+  import RawPingMapPopup from './RawPingMapPopup.svelte';
+  import type { ScheduleTripLine } from './RawPingMapPopup.svelte';
 
   const blockIds = $derived.by(() => {
     const ids = [...new Set(vehicleAssignments.map(a => a.block_id).filter(Boolean))];
@@ -77,11 +78,44 @@
   let blockPingData           = $state<BlockPingData | null>(null);
   let blockMetrics            = $state<BlockMetrics | null>(null);
   let fetchedVehiclePositions = $state<VehiclePosition[]>([]);
+  let rawApiPositions         = $state<{ lat: number; lon: number; timestamp: number }[]>([]);
   let isPingLoading           = $state(false);
   let isPingComputing         = $state(false);
   let showRawPingMap          = $state(false);
 
   let _scheduleWorker: Worker | null = null;
+
+  // ── Raw ping map popup data ───────────────────────────────────────────────────
+
+  const rawPingPopupData = $derived.by(() => {
+    if (!gtfsData || !selectedBlockId || rawApiPositions.length === 0) return null;
+    const tz       = [...gtfsData.agencies.values()][0]?.agency_timezone ?? 'UTC';
+    const midnight = localMidnightEpoch(selectedDate, tz);
+
+    const pings = [...rawApiPositions]
+      .filter(p => p.lat !== 0 && p.lon !== 0)
+      .map(p => ({ lat: p.lat, lon: p.lon, timeMin: (p.timestamp - midnight) / 60 }))
+      .sort((a, b) => a.timeMin - b.timeMin);
+
+    const schedTrips: ScheduleTripLine[] = blockTripIds.map(tid => {
+      const sts = gtfsData.stopTimesByTrip.get(tid) ?? [];
+      const stops = sts
+        .map(st => {
+          const stop = gtfsData.stops.get(st.stop_id);
+          return stop
+            ? { stopId: st.stop_id, lat: stop.stop_lat, lon: stop.stop_lon, name: stop.stop_name }
+            : null;
+        })
+        .filter((s): s is { stopId: string; lat: number; lon: number; name: string } => s !== null);
+      const startMin = sts.length > 0
+        ? parseTimeMin(sts[0].departure_time  || sts[0].arrival_time) : 0;
+      const endMin   = sts.length > 0
+        ? parseTimeMin(sts.at(-1)!.arrival_time || sts.at(-1)!.departure_time) : 0;
+      return { tid, stops, startMin, endMin };
+    });
+
+    return { pings, schedTrips };
+  });
 
   function resolvePositionTrips(
     rawPositions: ApiPosition[],
@@ -116,14 +150,14 @@
     if (_scheduleWorker) { _scheduleWorker.terminate(); _scheduleWorker = null; }
 
     if (!gdata || !tids.length) {
-      blockPingData = null; blockMetrics = null; fetchedVehiclePositions = [];
+      blockPingData = null; blockMetrics = null; fetchedVehiclePositions = []; rawApiPositions = [];
       isPingLoading = false; isPingComputing = false;
       return;
     }
 
     // Show loading immediately — the async IIFE below will yield before doing any
     // heavy synchronous work (cache parse, structured-clone) so this state is painted.
-    blockPingData = null; blockMetrics = null; fetchedVehiclePositions = [];
+    blockPingData = null; blockMetrics = null; fetchedVehiclePositions = []; rawApiPositions = [];
     isPingLoading = true;  isPingComputing = false;
 
     let cancelled = false;
@@ -144,7 +178,11 @@
         isPingLoading = false;
         if (vehicleId) {
           fetchVehiclePositions(date, vehicleId)
-            .then(raw => { if (!cancelled) fetchedVehiclePositions = resolvePositionTrips(raw, tids, gdata, date); })
+            .then(raw => {
+              if (cancelled) return;
+              rawApiPositions         = raw.map(p => ({ lat: p.lat, lon: p.lon, timestamp: Math.floor(new Date(p.timestamp).getTime() / 1000) }));
+              fetchedVehiclePositions = resolvePositionTrips(raw, tids, gdata, date);
+            })
             .catch(() => {});
         }
         return;
@@ -156,6 +194,7 @@
         const raw = await fetchVehiclePositions(date, vehicleId);
         if (cancelled) return;
 
+        rawApiPositions         = raw.map(p => ({ lat: p.lat, lon: p.lon, timestamp: Math.floor(new Date(p.timestamp).getTime() / 1000) }));
         fetchedVehiclePositions = resolvePositionTrips(raw, tids, gdata, date);
         isPingLoading = false;
 
@@ -338,6 +377,21 @@
                 {/if}
               </span>
             {/if}
+            {#if rawApiPositions.length > 0}
+              <button
+                onclick={() => (showRawPingMap = true)}
+                class="ml-auto flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5
+                       text-xs text-slate-300 hover:bg-slate-700 hover:text-white transition-colors"
+              >
+                <svg class="h-3.5 w-3.5 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                  <path stroke-linecap="round" stroke-linejoin="round"
+                        d="M15 10.5a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z"/>
+                  <path stroke-linecap="round" stroke-linejoin="round"
+                        d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1 1 15 0Z"/>
+                </svg>
+                View raw pings
+              </button>
+            {/if}
           </div>
 
           {#if tripsForBlock.length > 0}
@@ -413,19 +467,7 @@
           {:else if blockPingData.error === 'no_match'}
             <div class="flex flex-col items-center justify-center gap-3 py-12 text-sm text-slate-500">
               <p>No pings landed within 150 m of any scheduled stop — stop coordinates may be mismatched with GPS data.</p>
-              {#if fetchedVehiclePositions.length > 0}
-                <button
-                  onclick={() => (showRawPingMap = true)}
-                  class="flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5
-                         text-xs text-slate-300 hover:bg-slate-700 hover:text-white transition-colors"
-                >
-                  <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-                    <path stroke-linecap="round" stroke-linejoin="round"
-                          d="M9 6.75V15m6-6v8.25m.503 3.498 4.875-2.437c.381-.19.622-.58.622-1.006V4.82c0-.836-.88-1.38-1.628-1.006l-3.869 1.934c-.317.159-.69.159-1.006 0L9.503 3.252a1.125 1.125 0 0 0-1.006 0L3.622 5.689C3.24 5.88 3 6.27 3 6.695V19.18c0 .836.88 1.38 1.628 1.006l3.869-1.934c-.317-.159.69-.159 1.006 0l4.994 2.497c.317.159.69.159 1.006 0Z"/>
-                  </svg>
-                  View raw ping map ({fetchedVehiclePositions.length} pings)
-                </button>
-              {/if}
+              <p class="text-xs">Use <span class="font-medium text-slate-300">View raw pings</span> above to inspect GPS positions against the scheduled route.</p>
             </div>
 
           {:else}
@@ -467,13 +509,11 @@
   </div>
 </div>
 
-{#if showRawPingMap}
-  <TripMapPopup
-    tripIdx={0}
-    tripId={selectedBlockId}
-    stops={[]}
-    pings={fetchedVehiclePositions.map(p => ({ lat: p.lat, lon: p.lon }))}
-    matchedPings={[]}
+{#if showRawPingMap && rawPingPopupData}
+  <RawPingMapPopup
+    blockId={selectedBlockId}
+    pings={rawPingPopupData.pings}
+    schedTrips={rawPingPopupData.schedTrips}
     onClose={() => (showRawPingMap = false)}
   />
 {/if}

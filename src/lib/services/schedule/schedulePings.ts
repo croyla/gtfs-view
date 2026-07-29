@@ -4,8 +4,14 @@ import { haversineKm, parseTimeMin } from '../popupUtils';
 
 // ── Matching constants ────────────────────────────────────────────────────────
 
-const SEQ_STOP_KM         = 0.15;  // 150 m – ping-to-stop match radius
+const SEQ_STOP_KM         = 0.25;  // 250 m – ping-to-stop match radius
 const BLOCK_PRE_SLACK_MIN = 10;    // minutes before block start to include pings
+
+// Ephemeral (interpolated) ping points, inserted along the straight line between
+// two consecutive real pings so sparse GPS traces still land within SEQ_STOP_KM of
+// a stop. Position and time are both interpolated linearly by distance fraction.
+const EPHEMERAL_STEP_KM = 0.005; // 5 m spacing
+const EPHEMERAL_MAX_GAP_KM = 2;  // skip interpolation across gaps this large (likely idle/off-route, not a straight path)
 
 // ── Interfaces ────────────────────────────────────────────────────────────────
 
@@ -78,6 +84,50 @@ export function buildSortedPings(
   return pings
     .map(p => ({ p, t: epochToMin(p.timestamp) }))
     .sort((a, b) => a.t - b.t);
+}
+
+// ── Ephemeral ping densification ────────────────────────────────────────────────
+
+/**
+ * Densify a time-sorted ping list by inserting ephemeral (synthetic) points every
+ * EPHEMERAL_STEP_KM along the straight line between each pair of consecutive real
+ * pings. Both position and time are interpolated linearly by distance fraction,
+ * i.e. assuming constant speed between the two real pings.
+ *
+ * Used only to improve stop-visit detection when real GPS pings are sparse — the
+ * result must never be surfaced as observed data (data availability, chart dots),
+ * only used as a matching aid.
+ */
+export function buildEphemeralPings(sortedPings: PingWithTime[]): PingWithTime[] {
+  const out: PingWithTime[] = [];
+  for (let i = 0; i < sortedPings.length; i++) {
+    const a = sortedPings[i];
+    out.push(a);
+    if (i === sortedPings.length - 1) continue;
+
+    const b = sortedPings[i + 1];
+    const distKm = haversineKm(a.p.lat, a.p.lon, b.p.lat, b.p.lon);
+    if (distKm <= EPHEMERAL_STEP_KM || distKm > EPHEMERAL_MAX_GAP_KM) continue;
+
+    const numSteps = Math.floor(distKm / EPHEMERAL_STEP_KM);
+    for (let s = 1; s <= numSteps; s++) {
+      const d = s * EPHEMERAL_STEP_KM;
+      if (d >= distKm) break;
+      const f = d / distKm;
+      out.push({
+        t: a.t + (b.t - a.t) * f,
+        p: {
+          id: -1, vehicle_id: a.p.vehicle_id, trip_id: null, route_id: null,
+          lat: a.p.lat + (b.p.lat - a.p.lat) * f,
+          lon: a.p.lon + (b.p.lon - a.p.lon) * f,
+          bearing: null, speed: null, status: '',
+          timestamp: a.p.timestamp + (b.p.timestamp - a.p.timestamp) * f,
+          interpolated: true,
+        },
+      });
+    }
+  }
+  return out;
 }
 
 // ── Binary search ─────────────────────────────────────────────────────────────
@@ -570,21 +620,27 @@ function p3Score(distKm: number, devMin: number): number {
 }
 
 /**
- * Phase 3: scan every raw ping within the trip's observed time window and,
- * for each stop, keep the ping with the lowest combined distance+temporal score.
+ * Phase 3: scan every candidate ping (real + ephemeral) within the trip's observed
+ * time window and, for each stop, keep the ping with the lowest combined
+ * distance+temporal score.
  *
  * - Unvisited stops: any in-range ping fills the gap.
  * - Already-visited stops: replaced only when the new ping scores strictly
  *   lower (i.e. geographically similar but temporally better, or vice-versa).
  *
+ * `candidatePings` (real + ephemeral, densified) is used to find matches;
+ * `rawPings` (real only) is used to rebuild `record.pings` so ephemeral points
+ * never leak into observed-ping-facing data (chart dots, ping counts).
+ *
  * Operates in-place on `record.stopMatches` and rebuilds `record.pings` if
  * any matches were added or replaced.
  */
 function fillMissingStopMatches(
-  record:      TripRecord,
-  stopInfos:   StopInfo[],
-  sortedPings: PingWithTime[],
-  pfx:         string,
+  record:         TripRecord,
+  stopInfos:      StopInfo[],
+  candidatePings: PingWithTime[],
+  rawPings:       PingWithTime[],
+  pfx:            string,
 ): void {
   const visited = record.stopMatches.filter(m => m.visited);
   if (visited.length === 0) return;
@@ -595,7 +651,7 @@ function fillMissingStopMatches(
     if (m.matchedPingT! > tLast)  tLast  = m.matchedPingT!;
   }
 
-  const lo = lowerBound(sortedPings, tFirst);
+  const lo = lowerBound(candidatePings, tFirst);
   let filled = 0, refined = 0;
 
   for (let j = 0; j < record.stopMatches.length; j++) {
@@ -611,8 +667,8 @@ function fillMissingStopMatches(
     let bestDist   = SEQ_STOP_KM;
     let bestScore  = currentScore;
 
-    for (let i = lo; i < sortedPings.length && sortedPings[i].t <= tLast; i++) {
-      const pw  = sortedPings[i];
+    for (let i = lo; i < candidatePings.length && candidatePings[i].t <= tLast; i++) {
+      const pw  = candidatePings[i];
       const d   = haversineKm(info.lat, info.lon, pw.p.lat, pw.p.lon);
       if (d >= SEQ_STOP_KM) continue;
       const score = p3Score(d, pw.t - info.schedMin);
@@ -629,14 +685,16 @@ function fillMissingStopMatches(
         filled++;
         console.log(
           `${pfx} [phase3] ${record.tid} stop[${j}]=${info.stopId} FILL` +
-          ` dist=${bestDist.toFixed(3)}km dev=${sm.devMin.toFixed(1)}min`,
+          ` dist=${bestDist.toFixed(3)}km dev=${sm.devMin.toFixed(1)}min` +
+          (bestPing.p.interpolated ? ' (ephemeral)' : ''),
         );
       } else {
         refined++;
         console.log(
           `${pfx} [phase3] ${record.tid} stop[${j}]=${info.stopId} REFINE` +
           ` dist=${bestDist.toFixed(3)}km dev=${sm.devMin.toFixed(1)}min` +
-          ` score ${currentScore.toFixed(3)}→${bestScore.toFixed(3)}`,
+          ` score ${currentScore.toFixed(3)}→${bestScore.toFixed(3)}` +
+          (bestPing.p.interpolated ? ' (ephemeral)' : ''),
         );
       }
     }
@@ -649,7 +707,7 @@ function fillMissingStopMatches(
       if (m.matchedPingT! < t0) t0 = m.matchedPingT!;
       if (m.matchedPingT! > t1) t1 = m.matchedPingT!;
     }
-    record.pings = getPingsInWindow(t0, t1, sortedPings);
+    record.pings = getPingsInWindow(t0, t1, rawPings);
     console.log(
       `${pfx} [phase3] ${record.tid} filled=${filled} refined=${refined} pings=${record.pings.length}`,
     );
@@ -666,8 +724,14 @@ function fillMissingStopMatches(
  *   sequence regression, first-stop restart).
  * Phase 2 — Temporal assignment: assign each geographic run to the trip whose
  *   scheduled times best match the run's observed ping times.
- * Phase 3 — Gap fill: for each identified trip, scan raw pings within the
- *   trip's observed window and match any stop still unvisited but within 150 m.
+ * Phase 3 — Gap fill: for each identified trip, scan candidate pings (real +
+ *   ephemeral) within the trip's observed window and match any stop still
+ *   unvisited but within SEQ_STOP_KM.
+ *
+ * Phases 1 and 3 both search a densified ping list — real pings plus ephemeral
+ * points linearly interpolated every 5 m between consecutive real pings — so
+ * sparse GPS traces still register a stop visit. `record.pings` (surfaced to
+ * charts/metrics) is always rebuilt from real pings only.
  */
 export function matchBlockPings(
   sortedTripIds:      string[],
@@ -679,11 +743,15 @@ export function matchBlockPings(
 
   const blockStartMin = allStopInfos[0]?.[0]?.schedMin ?? 0;
   const relevant      = sortedVehiclePings.filter(pw => pw.t >= blockStartMin - BLOCK_PRE_SLACK_MIN);
+  const densified     = buildEphemeralPings(relevant);
 
   const blockId = sortedTripIds[0] ? `trips:${sortedTripIds.length}` : 'unknown';
-  console.group(`[matchBlockPings] block ${blockId} — ${n} trips, ${relevant.length} relevant pings`);
+  console.group(
+    `[matchBlockPings] block ${blockId} — ${n} trips, ${relevant.length} relevant pings` +
+    ` (+${densified.length - relevant.length} ephemeral)`,
+  );
 
-  const journey = buildJourney(relevant, allStopInfos, blockId);
+  const journey = buildJourney(densified, allStopInfos, blockId);
 
   if (journey.length === 0) {
     console.warn(`[block:${blockId}] journey is empty — no pings landed within ${SEQ_STOP_KM * 1000}m of any stop`);
@@ -702,7 +770,7 @@ export function matchBlockPings(
   const tripRecords = matchJourneyToTrips(journey, sortedTripIds, allStopInfos, relevant, blockId);
   const pfx = `[block:${blockId}]`;
   for (let i = 0; i < tripRecords.length; i++) {
-    fillMissingStopMatches(tripRecords[i], allStopInfos[i], relevant, pfx);
+    fillMissingStopMatches(tripRecords[i], allStopInfos[i], densified, relevant, pfx);
   }
 
   const skippedCount = tripRecords.filter(r => !r.stopMatches.some(m => m.visited)).length;

@@ -9,6 +9,7 @@ export interface VehiclePosition {
   timestamp: number;    // Unix epoch seconds
   speed: number | null; // m/s from source (null in this dataset — derived instead)
   status: string;
+  interpolated?: boolean; // true for ephemeral points synthesized between real pings
 }
 
 // Vehicle position enriched with derived speed (computed from consecutive position deltas)

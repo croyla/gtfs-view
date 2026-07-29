@@ -1,5 +1,6 @@
-const DB_NAME    = 'gtfs-dataviz';
-const DB_VERSION = 1;
+const DB_NAME             = 'gtfs-dataviz';
+const DB_VERSION          = 1;
+const MAX_CACHE_AGE_DAYS  = 30;
 
 let _db: IDBDatabase | null = null;
 
@@ -33,14 +34,71 @@ function idbPut(store: string, key: string, value: unknown): Promise<void> {
   }));
 }
 
+function cutoffDateStr(): string {
+  const d = new Date(Date.now() - MAX_CACHE_AGE_DAYS * 86400_000);
+  return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+}
+
+// Evict entries older than MAX_CACHE_AGE_DAYS. Keys are YYYYMMDD date strings,
+// so lexicographic comparison matches chronological order.
+async function pruneOldEntries(store: string): Promise<void> {
+  try {
+    const cutoff = cutoffDateStr();
+    const db = await openDb();
+    await new Promise<void>((resolve) => {
+      const tx  = db.transaction(store, 'readwrite');
+      const req = tx.objectStore(store).openCursor();
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (!cursor) return;
+        if (typeof cursor.key === 'string' && cursor.key < cutoff) cursor.delete();
+        cursor.continue();
+      };
+      tx.oncomplete = () => resolve();
+      tx.onerror    = () => resolve();
+    });
+  } catch { /* ignore */ }
+}
+
+// Reactive fallback for QuotaExceededError: evict the oldest `count` entries
+// (ascending key order == oldest date first) then let the caller retry.
+async function evictOldest(store: string, count: number): Promise<void> {
+  try {
+    const db = await openDb();
+    await new Promise<void>((resolve) => {
+      const tx  = db.transaction(store, 'readwrite');
+      const req = tx.objectStore(store).openCursor();
+      let deleted = 0;
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (!cursor || deleted >= count) return;
+        cursor.delete();
+        deleted++;
+        cursor.continue();
+      };
+      tx.oncomplete = () => resolve();
+      tx.onerror    = () => resolve();
+    });
+  } catch { /* ignore */ }
+}
+
+async function putWithEviction(store: string, date: string, value: unknown): Promise<void> {
+  try {
+    await idbPut(store, date, value);
+  } catch {
+    await evictOldest(store, 5);
+    try { await idbPut(store, date, value); } catch { /* give up — quota / private-mode */ }
+  }
+  pruneOldEntries(store); // fire-and-forget
+}
+
 export async function getCachedBundle<T>(date: string): Promise<T | null> {
   try { return await idbGet<T>('bundles', date); }
   catch { return null; }
 }
 
 export async function setCachedBundle(date: string, bundle: unknown): Promise<void> {
-  try { await idbPut('bundles', date, bundle); }
-  catch { /* ignore quota / private-mode errors */ }
+  await putWithEviction('bundles', date, bundle);
 }
 
 export async function getCachedPositions<T>(date: string): Promise<T[] | null> {
@@ -49,6 +107,5 @@ export async function getCachedPositions<T>(date: string): Promise<T[] | null> {
 }
 
 export async function setCachedPositions(date: string, positions: unknown[]): Promise<void> {
-  try { await idbPut('positions', date, positions); }
-  catch { /* ignore */ }
+  await putWithEviction('positions', date, positions);
 }

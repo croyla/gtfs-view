@@ -12,7 +12,7 @@
     PUNCT_END_THRESHOLD_PCT,
     type BlockMetrics,
   } from '../services/schedule/scheduleMetrics';
-  import { pingCacheGet } from '../stores/pingDataCache';
+  import { pingCacheGet, pingCacheSet } from '../stores/pingDataCache';
 
   let {
     gtfsData,
@@ -112,11 +112,15 @@
     let metrics: BlockMetrics | null = null;
 
     if (hasLive) {
+      const cached = pingCacheGet(blockId, date);
       const sortedVehiclePings = buildSortedPings(rawVehiclePings, epochToMin);
-      const pingData = pingCacheGet(blockId, date)?.pingData
-        ?? matchBlockPings(sorted, sortedVehiclePings, gtfsData);
+      const pingData = cached?.pingData ?? matchBlockPings(sorted, sortedVehiclePings, gtfsData);
 
       metrics = computeBlockMetrics(pingData, taggedPings, gtfsData);
+
+      // Share the freshly-computed result with the Schedules tab so it doesn't
+      // recompute matchBlockPings from scratch (no-op for today / already cached).
+      if (!cached) pingCacheSet(blockId, date, { pingData, metrics });
 
       let obsBlockFirstT: number | null = null;
       let obsBlockLastT:  number | null = null;

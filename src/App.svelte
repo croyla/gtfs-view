@@ -33,9 +33,17 @@
 
   // ── Data ──────────────────────────────────────────────────────────────────────
 
+  // `dates` is the *selectable* date list — the current day is always excluded
+  // because its operations may still be running (see `rawDates`/`selectableDates`).
   let dates = $state<string[]>([]);
+  let rawDates = $state<string[]>([]); // full list from server, current day included
   let dateIndex = $state(0);
   let selectedDate = $derived(dates[dateIndex] ?? '');
+
+  // Drop the current (last) day unless it's the only date available.
+  function selectableDates(allDates: string[]): string[] {
+    return allDates.length > 1 ? allDates.slice(0, -1) : allDates;
+  }
 
   let gtfsData  = $state<GtfsData | null>(null);
   let liveData  = $state<LiveData | null>(null);
@@ -186,7 +194,7 @@
     dates = allDates;
     dateIndex = idx;
     const date = allDates[idx];
-    const isLatest = date === allDates[allDates.length - 1];
+    const isLatest = date === rawDates[rawDates.length - 1];
 
     // Close any existing stream before switching dates
     ws?.close(); ws = null;
@@ -298,7 +306,9 @@
       await authenticate(passwordInput.trim());
       const fetchedDates = await fetchDates();
       if (fetchedDates.length === 0) throw new Error('No data available on the server');
-      await loadDate(fetchedDates, fetchedDates.length - 1);
+      rawDates = fetchedDates;
+      const selectable = selectableDates(fetchedDates);
+      await loadDate(selectable, selectable.length - 1);
       backgroundPrefetch(fetchedDates);
     } catch (err) {
       passwordError = err instanceof Error ? err.message : 'Authentication failed';
@@ -315,7 +325,9 @@
     try {
       const fetchedDates = await fetchDates();
       if (fetchedDates.length === 0) { screen = 'password'; return; }
-      await loadDate(fetchedDates, fetchedDates.length - 1);
+      rawDates = fetchedDates;
+      const selectable = selectableDates(fetchedDates);
+      await loadDate(selectable, selectable.length - 1);
       backgroundPrefetch(fetchedDates);
     } catch {
       clearToken();
